@@ -1,0 +1,5 @@
+source/
+_extract/
+*.tar.xz
+build/
+out/

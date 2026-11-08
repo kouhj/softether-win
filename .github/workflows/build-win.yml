@@ -1,0 +1,58 @@
+name: build-win
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  SOFTETHER_VERSION: '5.2.5189'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg\installed
+          key: vcpkg-${{ runner.os }}-x64-windows-static-${{ hashFiles('.github/workflows/build-win.yml') }}
+
+      - name: Fetch, patch and prepare the source
+        run: python scripts/prepare-source.py
+
+      - name: Configure
+        run: |
+          cmake -S source -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_BUILD_TYPE=Release
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Collect the binaries
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Get-ChildItem build -Filter *.exe -Recurse | Copy-Item -Destination out
+          Get-ChildItem build -Filter *.se2 -Recurse | Copy-Item -Destination out
+          Get-ChildItem out | Select-Object Name, Length | Format-Table
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: softether-win-${{ env.SOFTETHER_VERSION }}
+          path: out/*
+          if-no-files-found: error
