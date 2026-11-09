@@ -145,10 +145,18 @@ jobs:
           EOF
           # no checkout in this job, so tell gh which repository it is
           REPO="$GITHUB_REPOSITORY"
-          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            for old in $(gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name'); do
-              [ "$old" = "$zipname" ] || [ "$old" = SHA256SUMS ] || gh release delete-asset "$TAG" "$old" -R "$REPO" --yes
-            done
+          # ask the API instead of `gh release view`: the API also lists drafts,
+          # which is what a release becomes when its tag is deleted and pushed
+          # again, and an unnoticed draft is invisible to everybody
+          rel_id=$(gh api "repos/$REPO/releases?per_page=100" \
+            -q ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
+          if [ -n "$rel_id" ]; then
+            gh api "repos/$REPO/releases/$rel_id/assets" -q '.[] | "\(.id) \(.name)"' |
+              while read -r id name; do
+                [ "$name" = "$zipname" ] || [ "$name" = SHA256SUMS ] ||
+                  gh api -X DELETE "repos/$REPO/releases/assets/$id"
+              done
+            gh api -X PATCH "repos/$REPO/releases/$rel_id" -f draft=false >/dev/null
             gh release upload "$TAG" -R "$REPO" "$zipname" SHA256SUMS --clobber
           else
             gh release create "$TAG" -R "$REPO" "$zipname" SHA256SUMS \
