@@ -59,9 +59,34 @@ switched off). Upstream has a `SKIP_OQS_PROVIDER` code path for exactly this
 case; the post-quantum provider is only an optional extra and nothing else
 depends on it.
 
+## Upstream build problems this repository works around
+
+Getting the unmodified release to compile with MSVC on the current SDK needed
+three fixes (all applied by `scripts/prepare-source.py`, none of them touches the
+feature):
+
+| problem | fix |
+|---|---|
+| the vendored `oqs-provider` fails with `error C7757` (empty initializer, every `OQS_ENABLE_SIG_*` family is off) | configure with `-DOQS_ENABLE=OFF`, which selects upstream's `SKIP_OQS_PROVIDER` path |
+| `wlanapi.h` pulls `windot11.h` in and that header does not parse (`NDIS_OBJECT_HEADER` undefined) | the SSID comes from `netsh wlan show interfaces` instead |
+| `BLAKE2` selection uses a generator expression, so `set_property(SOURCE <genex> ... HAVE_SSE2)` never applies and MSVC stops with "This code requires at least SSE2." | the two `set()` calls become a plain `if(HAS_SSE2)` |
+
 ## Status
 
-The native part builds in CI. The rule engine and the editor window compile but
-have not been exercised on a real Windows desktop yet: the WLAN probe, the wired
-gateway probe and the connect/disconnect path need a manual smoke test before
-this can be considered production ready.
+The build is green: the workflow compiles the release, links every tool and
+checks that both halves of the feature are in `vpncmgr.exe` (the tray entry, the
+editor class and the `netsh` probe); the step fails instead of shipping half of
+it. The artifact `softether-win-<version>` contains `vpncmgr.exe`,
+`vpnclient.exe`, `vpnserver.exe`, `vpnbridge.exe`, `vpncmd.exe`, `vpnsetup.exe`,
+`vpnsmgr.exe` and `hamcore.se2`.
+
+What is **not** verified yet: the behaviour on a real desktop. The rule engine,
+the probes and the editor window compile and link, but nobody has clicked
+through them on Windows. Minimum smoke test:
+
+1. tray icon → *Network connection rules...* opens the editor;
+2. add a Wi-Fi rule, *Use current* fills the SSID, *Save* writes
+   `%ProgramData%\SoftEther VPN Client\net_rules.ini`;
+3. connecting that SSID connects the named connection, leaving it disconnects;
+4. a wired rule for the gateway of the Ethernet adapter does the same;
+5. *All connections* acts on every connection.
