@@ -163,57 +163,14 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -eu
-          cat >notes.md <<EOF
-          SoftEther VPN ${SOFTETHER_VERSION}, built from the official upstream
-          release with MSVC (x64, static CRT) plus one local patch and one local
-          feature.
-
-          ## Installers
-
-          Two self-extracting installers, built exactly the way the official
-          release builds them: \`vpnsetup.exe\` generates them itself
-          (\`/SFXMODE:vpnclient\` and \`/SFXMODE:vpnserver_vpnbridge\`), embedding
-          the component files and \`hamcore.se2\` as resources.
-
-              softether-vpnclient-5.02.${SOFTETHER_VERSION##5.2.}.x64.exe
-              softether-vpnserver_vpnbridge-5.02.${SOFTETHER_VERSION##5.2.}.x64.exe
-
-          Run the one you need and the usual setup wizard installs the VPN
-          Client, or the VPN Server and VPN Bridge together.
-
-          ## Archive
-
-          \`softether-win-${SOFTETHER_VERSION}-x64.zip\` holds \`vpncmgr.exe\`,
-          \`vpnclient.exe\`, \`vpnserver.exe\`, \`vpnbridge.exe\`, \`vpncmd.exe\`,
-          \`vpnsetup.exe\`, \`vpnsmgr.exe\` and \`hamcore.se2\`; unpack it over an
-          existing installation of the same version to upgrade it.
-
-          To install or upgrade from the archive, right click PowerShell, Run as
-          administrator, then run:
-
-              .\install.ps1                     upgrade what is installed
-              .\install.ps1 -Component server   fresh server installation
-              .\install.ps1 -NoSetup            files only, run vpnsetup.exe yourself
-
-          The script checks the files against SHA256SUMS, stops the VPN processes
-          (-Force), copies the files and runs vpnsetup.exe, which registers the
-          drivers and the services.
-
-          ## Patch and feature
-
-          Patch: the two assignments of \`is_restricted\` in
-          \`src/Cedar/Server.c\` are commented out, so the enterprise feature
-          flags (push route, RADIUS, certificate auth, deep logging, access
-          control, syslog) stay enabled.
-
-          Feature: network connection rules, a tray menu entry
-          (*Network connection rules...*) in \`vpncmgr.exe\` that connects or
-          disconnects a VPN Client connection depending on the Wi-Fi SSID or the
-          Ethernet default gateway. Rules live in
-          \`%ProgramData%\SoftEther VPN Client\net_rules.ini\`.
-
-          Not verified on a real desktop yet: see the smoke test in the README.
-          EOF
+          VERSION="$SOFTETHER_VERSION" FILE_VERSION="5.02.${SOFTETHER_VERSION##5.2.}" \
+            python3 - <<'PY'
+          import os
+          text = open("docs/RELEASE_NOTES.md", encoding="utf-8").read()
+          text = text.replace("{{VERSION}}", os.environ["VERSION"])
+          text = text.replace("{{FILE_VERSION}}", os.environ["FILE_VERSION"])
+          open("notes.md", "w", encoding="utf-8").write(text)
+          PY
           # no checkout in this job, so tell gh which repository it is
           REPO="$GITHUB_REPOSITORY"
           # ask the API instead of `gh release view`: the API also lists drafts,
@@ -229,7 +186,8 @@ jobs:
                 [ -f "assets/$asset" ] ||
                   gh api -X DELETE "repos/$REPO/releases/assets/$id"
               done
-            gh api -X PATCH "repos/$REPO/releases/$rel_id" -F draft=false >/dev/null
+            gh api -X PATCH "repos/$REPO/releases/$rel_id" \
+              -F draft=false -F body=@notes.md >/dev/null
             gh release upload "$TAG" -R "$REPO" assets/* --clobber
           else
             gh release create "$TAG" -R "$REPO" assets/* \

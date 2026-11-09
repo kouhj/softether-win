@@ -37,10 +37,15 @@ needed.
 ## Installing
 
 A release carries the same two self-extracting installers as the official
-release, built the same way: `vpnsetup.exe` generates them itself
-(`vpnsetup.exe /SFXMODE:vpnclient /SFXOUT:...`, and the same with
-`/SFXMODE:vpnserver_vpnbridge`), copying itself and embedding the files of the
-component as resources.
+release: a copy of `vpnsetup.exe` with the files of the component in its
+`DATAFILE` resource table, which is the layout `src/Cedar/SW.c` writes when it
+builds them. `vpnsetup.exe` is asked to build them itself first
+(`/SFXMODE:vpnclient /SFXOUT:...`), but on a build server it takes the arguments
+and then never writes anything (six minutes with 0.2 s of CPU time, no
+temporary file), so `scripts/build-installers.ps1` writes the same resource
+table and then opens every installer again, decodes each resource and compares
+it with the file it came from — the same decoding the installer performs on the
+target machine.
 
 | installer | contains |
 |---|---|
