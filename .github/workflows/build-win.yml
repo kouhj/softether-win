@@ -16,6 +16,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check the install script
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $env:GITHUB_WORKSPACE 'scripts/install.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error ("line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message) }
+            exit 1
+          }
+          # a dry run must not need admin rights or download anything
+          ./scripts/install.ps1 -DryRun
+          "the install script parses and its dry run succeeded"
+
       - name: Set up vcpkg
         run: |
           git clone --depth 1 https://github.com/microsoft/vcpkg "$env:VCPKG_ROOT"
@@ -109,8 +124,12 @@ jobs:
           set -eu
           name="softether-win-${SOFTETHER_VERSION}-x64"
           mv dist "$name"
+          # inside the archive, so an unpacked copy can be installed from its own
+          # directory; and beside it, so the release is usable without unpacking
+          cp scripts/install.ps1 "$name/install.ps1"
+          cp scripts/install.ps1 install.ps1
           zip -r "$name.zip" "$name"
-          sha256sum "$name.zip" >SHA256SUMS
+          sha256sum "$name.zip" install.ps1 >SHA256SUMS
           ls -l
 
       - name: Create or update the release
@@ -141,6 +160,18 @@ jobs:
           \`hamcore.se2\`; unpack it over an existing installation of the same
           version.
 
+          To install or upgrade, right click PowerShell, Run as administrator,
+          then run:
+
+              .\install.ps1                     upgrade what is installed
+              .\install.ps1 -Component server   fresh server installation
+              .\install.ps1 -NoSetup            files only, run vpnsetup.exe yourself
+
+          The script checks the archive against SHA256SUMS, stops the VPN
+          processes (-Force), copies the files and runs vpnsetup.exe, which
+          registers the drivers and the services. vpnsetup.exe is the official
+          installer and it is also inside the archive.
+
           Not verified on a real desktop yet: see the smoke test in the README.
           EOF
           # no checkout in this job, so tell gh which repository it is
@@ -153,13 +184,13 @@ jobs:
           if [ -n "$rel_id" ]; then
             gh api "repos/$REPO/releases/$rel_id/assets" -q '.[] | "\(.id) \(.name)"' |
               while read -r id name; do
-                [ "$name" = "$zipname" ] || [ "$name" = SHA256SUMS ] ||
+                [ "$name" = "$zipname" ] || [ "$name" = install.ps1 ] || [ "$name" = SHA256SUMS ] ||
                   gh api -X DELETE "repos/$REPO/releases/assets/$id"
               done
             gh api -X PATCH "repos/$REPO/releases/$rel_id" -f draft=false >/dev/null
-            gh release upload "$TAG" -R "$REPO" "$zipname" SHA256SUMS --clobber
+            gh release upload "$TAG" -R "$REPO" "$zipname" install.ps1 SHA256SUMS --clobber
           else
-            gh release create "$TAG" -R "$REPO" "$zipname" SHA256SUMS \
+            gh release create "$TAG" -R "$REPO" "$zipname" install.ps1 SHA256SUMS \
               --title "SoftEther VPN ${SOFTETHER_VERSION} (patched, Windows x64)" \
               --notes-file notes.md
           fi

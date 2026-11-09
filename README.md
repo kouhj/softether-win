@@ -34,6 +34,33 @@ Note: SSIDs are compared with the SSID Windows currently associates with; the
 editor fills the field from the live connection, so no WLAN profile parsing is
 needed.
 
+## Installing
+
+A release carries `softether-win-<version>-x64.zip`, `install.ps1` and
+`SHA256SUMS`. The zip is the eight files of an installation
+(`vpnsetup.exe`, `vpnsmgr.exe`, `vpncmgr.exe`, `vpnclient.exe`,
+`vpnserver.exe`, `vpnbridge.exe`, `vpncmd.exe`, `hamcore.se2`), which is exactly
+what an in-place upgrade of an existing installation replaces.
+
+`install.ps1` automates that upgrade. Run it from an **administrator**
+PowerShell:
+
+```powershell
+.\install.ps1                      # upgrade every installation that is present
+.\install.ps1 -Component server    # fresh server installation
+.\install.ps1 -NoSetup             # copy the files, run vpnsetup.exe yourself
+.\install.ps1 -Zip .\softether-win-5.2.5189-x64.zip
+.\install.ps1 -DryRun              # say what would happen, change nothing
+```
+
+It downloads the archive from the release unless `-Zip` names a local copy,
+checks it against `SHA256SUMS`, refuses to run without administrator rights,
+refuses to kill a running VPN client unless `-Force` is given, copies the files
+into `%ProgramFiles%\SoftEther VPN Client|Server|Bridge` and finally runs
+`vpnsetup.exe`, the official setup program, which installs the drivers and
+registers the services. Without a script it is the same manual procedure: unpack
+the zip over the installation directory and run `vpnsetup.exe` there.
+
 ## How the build works
 
 `scripts/prepare-source.py` downloads `SoftEtherVPN-<version>.tar.xz`, applies
