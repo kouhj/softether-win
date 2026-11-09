@@ -48,12 +48,19 @@ foreach ($target in $targets) {
     Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue
 
     Write-Host "building $($target.Name) (SFXMODE=$($target.Mode))"
-    # vpnsetup.exe is a GUI binary, so wait for it explicitly; -BinDir is the
-    # working directory because the generator copies "vpnsetup.exe" by a
-    # relative name and reads the payload from its own directory
-    $arguments = '/SFXMODE:{0} /SFXOUT:"{1}"' -f $target.Mode, $out
+    # vpnsetup.exe is a GUI binary: the working directory is the tool directory
+    # because the generator copies "vpnsetup.exe" by a relative name and reads
+    # the payload from its own directory. Pass the arguments as an array, one
+    # element per argument, so that PowerShell quotes them itself.
+    $arguments = @("/SFXMODE:$($target.Mode)", "/SFXOUT:$out")
     $process = Start-Process -FilePath $setup -ArgumentList $arguments `
-        -WorkingDirectory (Split-Path -Parent $setup) -Wait -PassThru
+        -WorkingDirectory (Split-Path -Parent $setup) -PassThru
+    # if the arguments did not arrive, vpnsetup.exe opens its setup wizard and
+    # waits for a click that a build server never gives it
+    if (-not $process.WaitForExit(180000)) {
+        $process.Kill()
+        throw "vpnsetup.exe did not finish within three minutes for $($target.Mode)"
+    }
     if ($process.ExitCode -ne 0) {
         throw "vpnsetup.exe exited with $($process.ExitCode) for $($target.Mode)"
     }
