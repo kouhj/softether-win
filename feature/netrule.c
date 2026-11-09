@@ -31,6 +31,14 @@
 #include "CMInner.h"
 #include "WinUi.h"
 
+// the Mayaqua headers CM.c also pulls in: without Memory.h the LIST_NUM and
+// LIST_DATA macros are invisible and the calls become undefined externals
+#include "Mayaqua/FileIO.h"
+#include "Mayaqua/Internat.h"
+#include "Mayaqua/Kernel.h"
+#include "Mayaqua/Memory.h"
+#include "Mayaqua/Str.h"
+
 #include "netrule.h"
 
 bool nr_auto_mode = false;
