@@ -77,3 +77,72 @@ jobs:
           name: softether-win-${{ env.SOFTETHER_VERSION }}
           path: out/*
           if-no-files-found: error
+
+  # Tag pushes also publish a release: the binaries are zipped together with
+  # hamcore.se2 so the archive can be unpacked over an existing installation.
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: softether-win-${{ env.SOFTETHER_VERSION }}
+          path: dist
+
+      - name: Pack and checksum
+        run: |
+          set -eu
+          name="softether-win-${SOFTETHER_VERSION}-x64"
+          mv dist "$name"
+          zip -r "$name.zip" "$name"
+          sha256sum "$name.zip" >SHA256SUMS
+          ls -l
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          zipname="softether-win-${SOFTETHER_VERSION}-x64.zip"
+          cat >notes.md <<EOF
+          SoftEther VPN ${SOFTETHER_VERSION}, built from the official upstream
+          release with MSVC (x64, static CRT) plus one local patch and one local
+          feature.
+
+          Patch: the two assignments of \`is_restricted\` in
+          \`src/Cedar/Server.c\` are commented out, so the enterprise feature
+          flags (push route, RADIUS, certificate auth, deep logging, access
+          control, syslog) stay enabled.
+
+          Feature: network connection rules, a tray menu entry
+          (*Network connection rules...*) in \`vpncmgr.exe\` that connects or
+          disconnects a VPN Client connection depending on the Wi-Fi SSID or the
+          Ethernet default gateway. Rules live in
+          \`%ProgramData%\SoftEther VPN Client\net_rules.ini\`.
+
+          The archive holds \`vpncmgr.exe\`, \`vpnclient.exe\`, \`vpnserver.exe\`,
+          \`vpnbridge.exe\`, \`vpncmd.exe\`, \`vpnsetup.exe\`, \`vpnsmgr.exe\` and
+          \`hamcore.se2\`; unpack it over an existing installation of the same
+          version.
+
+          Not verified on a real desktop yet: see the smoke test in the README.
+          EOF
+          # no checkout in this job, so tell gh which repository it is
+          REPO="$GITHUB_REPOSITORY"
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            for old in $(gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name'); do
+              [ "$old" = "$zipname" ] || [ "$old" = SHA256SUMS ] || gh release delete-asset "$TAG" "$old" -R "$REPO" --yes
+            done
+            gh release upload "$TAG" -R "$REPO" "$zipname" SHA256SUMS --clobber
+          else
+            gh release create "$TAG" -R "$REPO" "$zipname" SHA256SUMS \
+              --title "SoftEther VPN ${SOFTETHER_VERSION} (patched, Windows x64)" \
+              --notes-file notes.md
+          fi
+          gh release view "$TAG" -R "$REPO" --json url -q .url
