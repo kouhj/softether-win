@@ -52,6 +52,13 @@ The workflow then configures with CMake + vcpkg (`openssl`, `libsodium`, `zlib`
 from the upstream `vcpkg.json`), builds with MSVC and uploads the `*.exe` and
 `*.se2` files.
 
+`-DOQS_ENABLE=OFF` is passed on purpose: the vendored `oqs-provider` fails to
+compile with recent MSVC (`error C7757: an array of unknown size cannot be
+initialized by an empty initializer`, because every `OQS_ENABLE_SIG_*` family is
+switched off). Upstream has a `SKIP_OQS_PROVIDER` code path for exactly this
+case; the post-quantum provider is only an optional extra and nothing else
+depends on it.
+
 ## Status
 
 The native part builds in CI. The rule engine and the editor window compile but

@@ -26,17 +26,24 @@ jobs:
       - name: Cache vcpkg packages
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}\vcpkg\installed
-          key: vcpkg-${{ runner.os }}-x64-windows-static-${{ hashFiles('.github/workflows/build-win.yml') }}
+          # the manifest build installs into VCPKG_INSTALLED_DIR, which is the
+          # directory configured below
+          path: ${{ github.workspace }}\vcpkg_installed
+          key: vcpkg-${{ runner.os }}-x64-windows-static-${{ env.SOFTETHER_VERSION }}
 
       - name: Fetch, patch and prepare the source
         run: python scripts/prepare-source.py
 
       - name: Configure
         run: |
+          # OQS_ENABLE=OFF: the vendored oqs-provider does not compile with
+          # MSVC (error C7757, an empty initializer for an array of unknown
+          # size); the code has a SKIP_OQS_PROVIDER path for this case
           cmake -S source -B build -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_INSTALLED_DIR="${{ github.workspace }}\vcpkg_installed" `
+            -DOQS_ENABLE=OFF `
             -DCMAKE_BUILD_TYPE=Release
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
