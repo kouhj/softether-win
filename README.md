@@ -53,6 +53,10 @@ PowerShell:
 .\install.ps1 -DryRun              # say what would happen, change nothing
 ```
 
+If Windows refuses to run the script with *running scripts is disabled on this
+system*, unblock the file once (`Unblock-File .\install.ps1`) or start it with
+`powershell -ExecutionPolicy Bypass -File .\install.ps1`.
+
 It downloads the archive from the release unless `-Zip` names a local copy,
 checks it against `SHA256SUMS`, refuses to run without administrator rights,
 refuses to kill a running VPN client unless `-Force` is given, copies the files
