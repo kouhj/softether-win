@@ -157,7 +157,7 @@ function New-SfxInstaller([string]$baseExe, [string]$destination, [string[]]$fil
 function Get-SfxResource([string]$exe, [string]$name) {
     $module = [Sfx]::LoadLibraryExW($exe, [IntPtr]::Zero, $loadAsDataFile)
     if ($module -eq [IntPtr]::Zero) {
-        throw "cannot open $exe: $(Get-Win32Message)"
+        throw "cannot open ${exe}: $(Get-Win32Message)"
     }
     try {
         $resource = [Sfx]::FindResourceA($module, $name, $resourceType)
