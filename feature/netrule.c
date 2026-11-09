@@ -20,15 +20,18 @@
 // the default gateway of the wired adapter equals its gateway (wired); every
 // matching rule is then applied.
 
+// the IP helper header has to come first, otherwise netioapi.h is entered
+// without its prerequisites (the headers of this project pin an older SDK
+// version, which makes netioapi.h skip ifmib.h and fail)
+#include <winsock2.h>
+#include <iphlpapi.h>
+#include <shlobj.h>
+
 #include "Cedar.h"
 #include "CMInner.h"
 #include "WinUi.h"
 
 #include "netrule.h"
-
-#include <iphlpapi.h>
-#include <iptypes.h>
-#include <shlobj.h>
 
 bool nr_auto_mode = false;
 
@@ -481,59 +484,61 @@ static void NrDoDisconnect(wchar_t *name)
 	nr_auto_mode = false;
 }
 
-// Walk the connection list of the main window and apply the action to every
-// entry whose name matches (an empty name matches everything).
+// Walk the client account list and apply the action to every connection whose
+// name matches (an empty name matches everything). The state comes from the
+// client API, so the rule monitor does not depend on what the window shows.
 static void NrApplyToConnections(bool connect, wchar_t *only)
 {
-	HWND hWnd = cm->hMainWnd;
+	RPC_CLIENT_ENUM_ACCOUNT e;
 	LIST *targets;
-	UINT i, num;
+	UINT i;
 
-	if (hWnd == NULL)
+	if (cm == NULL || cm->Client == NULL)
 	{
+		return;
+	}
+
+	Zero(&e, sizeof(e));
+	if (CcEnumAccount(cm->Client, &e) != ERR_NO_ERROR)
+	{
+		CiFreeClientEnumAccount(&e);
 		return;
 	}
 
 	targets = NewListFast(NULL);
 
-	num = LvNum(hWnd, L_ACCOUNT);
-	for (i = 0;i < num;i++)
+	for (i = 0;i < e.NumItem;i++)
 	{
-		wchar_t *name = LvGetStr(hWnd, L_ACCOUNT, i, 0);
-		wchar_t *state = LvGetStr(hWnd, L_ACCOUNT, i, 1);
-		bool online;
+		RPC_CLIENT_ENUM_ACCOUNT_ITEM *item = e.Items[i];
+		bool busy;
 
-		if (name == NULL)
+		if (item == NULL)
 		{
 			continue;
 		}
 
-		online = (state != NULL && (
-			UniStrCmpi(state, _UU("CM_ACCOUNT_ONLINE")) == 0 ||
-			UniStrCmpi(state, _UU("CM_ACCOUNT_CONNECTING")) == 0));
+		// "busy" covers both an established connection and one in transition
+		busy = (item->Connected || item->Active);
 
-		if (online == connect)
+		if (busy == connect)
 		{
-			// already in the wanted state
-			Free(name);
-			Free(state);
+			continue;		// already in the wanted state
+		}
+
+		if (IsEmptyUniStr(only) == false && UniStrCmpi(only, item->AccountName) != 0)
+		{
 			continue;
 		}
 
-		if (IsEmptyUniStr(only) == false && UniStrCmpi(only, name) != 0)
-		{
-			Free(name);
-			Free(state);
-			continue;
-		}
-
-		Add(targets, name);
-		Free(state);
+		Add(targets, CopyUniStr(item->AccountName));
 	}
+
+	CiFreeClientEnumAccount(&e);
 
 	for (i = 0;i < LIST_NUM(targets);i++)
 	{
 		wchar_t *name = LIST_DATA(targets, i);
+
 		if (connect)
 		{
 			NrDoConnect(name);
@@ -553,6 +558,7 @@ void NrApplyRules()
 {
 	LIST *rules;
 	wchar_t ssid[128], gw[64];
+	UINT i;
 
 	if (cm == NULL || cm->hMainWnd == NULL)
 	{
@@ -567,7 +573,6 @@ void NrApplyRules()
 
 	// only probe the link type the rules actually ask for
 	{
-		UINT i;
 		bool need_wifi = false, need_wired = false;
 
 		for (i = 0;i < LIST_NUM(rules);i++)
@@ -601,7 +606,6 @@ void NrApplyRules()
 
 	if (LIST_NUM(rules) > 0 && (ssid[0] != 0 || gw[0] != 0))
 	{
-		UINT i;
 		for (i = 0;i < LIST_NUM(rules);i++)
 		{
 			NR_RULE *r = LIST_DATA(rules, i);
