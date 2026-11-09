@@ -36,7 +36,23 @@ needed.
 
 ## Installing
 
-A release carries `softether-win-<version>-x64.zip`, `install.ps1` and
+A release carries the same two self-extracting installers as the official
+release, built the same way: `vpnsetup.exe` generates them itself
+(`vpnsetup.exe /SFXMODE:vpnclient /SFXOUT:...`, and the same with
+`/SFXMODE:vpnserver_vpnbridge`), copying itself and embedding the files of the
+component as resources.
+
+| installer | contains |
+|---|---|
+| `softether-vpnclient-5.02.<build>.x64.exe` | `vpnsetup.exe`, `vpnclient.exe`, `vpncmgr.exe`, `vpncmd.exe`, `hamcore.se2` |
+| `softether-vpnserver_vpnbridge-5.02.<build>.x64.exe` | `vpnsetup.exe`, `vpnserver.exe`, `vpnbridge.exe`, `vpnsmgr.exe`, `vpncmd.exe`, `hamcore.se2` |
+
+Run the one you need; the setup wizard then installs or upgrades that
+component, exactly like the official download. Every payload file except
+`hamcore.se2` is zlib-compressed in the resource table; `hamcore.se2` is stored
+raw as `raw_hamcore.se2` because it is already compressed.
+
+The release also carries `softether-win-<version>-x64.zip`, `install.ps1` and
 `SHA256SUMS`. The zip is the eight files of an installation
 (`vpnsetup.exe`, `vpnsmgr.exe`, `vpncmgr.exe`, `vpnclient.exe`,
 `vpnserver.exe`, `vpnbridge.exe`, `vpncmd.exe`, `hamcore.se2`), which is exactly
@@ -61,9 +77,21 @@ It downloads the archive from the release unless `-Zip` names a local copy,
 checks it against `SHA256SUMS`, refuses to run without administrator rights,
 refuses to kill a running VPN client unless `-Force` is given, copies the files
 into `%ProgramFiles%\SoftEther VPN Client|Server|Bridge` and finally runs
-`vpnsetup.exe`, the official setup program, which installs the drivers and
-registers the services. Without a script it is the same manual procedure: unpack
+`vpnsetup.exe`, which installs the drivers and registers the
+services. Without a script it is the same manual procedure: unpack
 the zip over the installation directory and run `vpnsetup.exe` there.
+
+### hamcore.se2
+
+`hamcore.se2` is the runtime resource bundle that every SoftEther executable
+reads from its own directory: the UI string tables of the eight languages
+(`strtable_*.stb`), the virtual network card driver packages
+(`DriverPackages/`, about 19 MB — Neo, Neo6 and SeLow for x86, x64 and arm64),
+the built-in web UI (`wwwroot`), the CA bundle `root_certs.dat`, the EULA and
+warning texts and the OpenVPN sample configuration. The build creates it with
+`hamcorebuilder hamcore.se2 src/bin/hamcore` (`src/CMakeLists.txt`), so it is a
+packaging step for one directory tree rather than a compiled binary; `.se2` is
+the SoftEther container format, and nothing outside SoftEther unpacks it.
 
 ## How the build works
 
@@ -74,7 +102,7 @@ the zip over the installation directory and run `vpnsetup.exe` there.
 |---|---|
 | `src/Cedar/netrule.c`, `netrule.h` | copied in verbatim |
 | `src/Cedar/CM.c` | includes the header, adds the tray menu entry and its handler, starts/stops the monitor around the message loop, and lets the monitor connect/disconnect without prompting |
-| `src/Cedar/CMakeLists.txt` | links `wlanapi` and `iphlpapi` |
+| `src/Cedar/CMakeLists.txt` | links `iphlpapi`, which the gateway lookup needs |
 
 Every edit is anchored on an exact string and asserted, so an upstream change
 fails the build instead of silently producing a broken tree.
