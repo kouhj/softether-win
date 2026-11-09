@@ -12,44 +12,32 @@ jobs:
           path: out
           run-id: 42617987144
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Prove the generator mode
+      - name: Watch the generator work
         shell: pwsh
         run: |
-          Get-ChildItem out | Select-Object Name, Length | Format-Table
           $exe = (Resolve-Path out\vpnsetup.exe).Path
           $dir = Split-Path -Parent $exe
           Set-Location $dir
+          $temp = $env:TEMP
+          "temp is $temp"
 
-          function Show-State($label) {
-            "--- $label"
-            Get-Process vpnsetup -ErrorAction SilentlyContinue |
-              Select-Object Id, Responding, MainWindowTitle | Format-Table | Out-String
-            Get-CimInstance Win32_Process -Filter "name='vpnsetup.exe'" |
-              Select-Object ProcessId, CommandLine | Format-List | Out-String
+          Start-Process -FilePath $exe -ArgumentList @('/SFXMODE:vpnclient', "/SFXOUT:$dir\A.exe") `
+            -WorkingDirectory $dir -PassThru | Out-Null
+
+          for ($i = 1; $i -le 36; $i++) {
+            Start-Sleep -Seconds 10
+            $f = Get-ChildItem $temp -Filter setup.exe -Recurse -File -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            $size = if ($f) { '{0:N0}' -f $f.Length } else { '-' }
+            $out = Test-Path "$dir\A.exe"
+            '{0,4}s  temp/setup.exe={1,12}  A.exe={2}' -f ($i * 10), $size, $out
+            if ($out) { break }
           }
 
-          "=== A: Start-Process with an array ==="
-          $a = "A.exe"
-          Start-Process -FilePath $exe -ArgumentList @('/SFXMODE:vpnclient', "/SFXOUT:$dir\$a") `
-            -WorkingDirectory $dir -PassThru | Out-Null
-          Start-Sleep -Seconds 20
-          "A.exe exists: $(Test-Path "$dir\$a")"
-          Show-State 'A'
+          Get-Process vpnsetup -ErrorAction SilentlyContinue |
+            Select-Object Id, Responding, MainWindowTitle, CPU, Handles,
+              @{n = 'Threads'; e = { $_.Threads.Count } } | Format-List | Out-String
+          Get-CimInstance Win32_Process -Filter "name='vpnsetup.exe'" |
+            Select-Object CommandLine | Format-List | Out-String
+          if (Test-Path "$dir\A.exe") { 'A.exe size: ' + (Get-Item "$dir\A.exe").Length }
           Stop-Process -Name vpnsetup -Force -ErrorAction SilentlyContinue
-          Remove-Item "$dir\$a" -ErrorAction SilentlyContinue
-
-          "=== B: call operator ==="
-          $b = "B.exe"
-          & $exe /SFXMODE:vpnclient "/SFXOUT:$dir\$b"
-          "B.exe exists: $(Test-Path "$dir\$b")"
-          Show-State 'B'
-          Stop-Process -Name vpnsetup -Force -ErrorAction SilentlyContinue
-          if (Test-Path "$dir\$b") { "B.exe size: " + (Get-Item "$dir\$b").Length }
-
-          "=== C: cmd /c with a single string ==="
-          $c = "C.exe"
-          cmd /c "`"$exe`" /SFXMODE:vpnclient /SFXOUT:""$dir\$c"""
-          "C.exe exists: $(Test-Path "$dir\$c")"
-          Show-State 'C'
-          Stop-Process -Name vpnsetup -Force -ErrorAction SilentlyContinue
-          if (Test-Path "$dir\$c") { "C.exe size: " + (Get-Item "$dir\$c").Length }
