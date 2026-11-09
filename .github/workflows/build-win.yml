@@ -67,9 +67,19 @@ jobs:
 
       - name: Collect the binaries
         run: |
+          # an allowlist: the build tree also holds CMake probes such as
+          # build\CMakeFiles\3.31.6\CompilerIdC\CompilerIdC.exe and the
+          # hamcorebuilder tool, neither of which belongs in a release
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          Get-ChildItem build -Filter *.exe -Recurse | Copy-Item -Destination out
-          Get-ChildItem build -Filter *.se2 -Recurse | Copy-Item -Destination out
+          $wanted = @(
+            "vpncmgr.exe", "vpnclient.exe", "vpnserver.exe", "vpnbridge.exe",
+            "vpncmd.exe", "vpnsetup.exe", "vpnsmgr.exe", "hamcore.se2"
+          )
+          foreach ($name in $wanted) {
+            $file = Get-ChildItem build -Filter $name -Recurse -File | Select-Object -First 1
+            if (-not $file) { throw "$name was not built" }
+            Copy-Item $file.FullName -Destination out
+          }
           Get-ChildItem out | Select-Object Name, Length | Format-Table
 
       - uses: actions/upload-artifact@v4
