@@ -51,6 +51,20 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      - name: Verify the feature is in the binary
+        run: |
+          # the build must contain both halves of the feature: the tray entry
+          # from CM.c and the editor from netrule.c
+          $exe = "build\Release\vpncmgr.exe"
+          if (-not (Test-Path $exe)) { throw "vpncmgr.exe was not built" }
+          $text = [System.Text.Encoding]::Unicode.GetString([System.IO.File]::ReadAllBytes($exe))
+          $missing = @()
+          foreach ($needle in @("Network connection rules", "NrRulesWindow", "net_rules.ini", "netsh wlan show interfaces")) {
+            if (-not $text.Contains($needle)) { $missing += $needle }
+          }
+          if ($missing.Count -gt 0) { throw "missing in vpncmgr.exe: $($missing -join ', ')" }
+          "all feature strings are present in vpncmgr.exe"
+
       - name: Collect the binaries
         run: |
           New-Item -ItemType Directory -Force -Path out | Out-Null

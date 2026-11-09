@@ -1176,3 +1176,8 @@ void NrRulesDialog(HWND hParent)
 	Free(nrw);
 	nrw = NULL;
 }
+
+// A concrete reference to the editor, so the linker cannot drop it together
+// with the strings it owns when /OPT:REF is in effect (the call from CM.c is
+// enough in theory, but a data symbol is a hard reference).
+void (*nr_dialog_entry)(HWND hWnd) = NrRulesDialog;
