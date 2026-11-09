@@ -1,0 +1,55 @@
+name: probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Get the tools from the last successful build
+        uses: actions/download-artifact@v4
+        with:
+          name: softether-win-5.2.5189
+          path: out
+          run-id: 42617987144
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prove the generator mode
+        shell: pwsh
+        run: |
+          Get-ChildItem out | Select-Object Name, Length | Format-Table
+          $exe = (Resolve-Path out\vpnsetup.exe).Path
+          $dir = Split-Path -Parent $exe
+          Set-Location $dir
+
+          function Show-State($label) {
+            "--- $label"
+            Get-Process vpnsetup -ErrorAction SilentlyContinue |
+              Select-Object Id, Responding, MainWindowTitle | Format-Table | Out-String
+            Get-CimInstance Win32_Process -Filter "name='vpnsetup.exe'" |
+              Select-Object ProcessId, CommandLine | Format-List | Out-String
+          }
+
+          "=== A: Start-Process with an array ==="
+          $a = "A.exe"
+          Start-Process -FilePath $exe -ArgumentList @('/SFXMODE:vpnclient', "/SFXOUT:$dir\$a") `
+            -WorkingDirectory $dir -PassThru | Out-Null
+          Start-Sleep -Seconds 20
+          "A.exe exists: $(Test-Path "$dir\$a")"
+          Show-State 'A'
+          Stop-Process -Name vpnsetup -Force -ErrorAction SilentlyContinue
+          Remove-Item "$dir\$a" -ErrorAction SilentlyContinue
+
+          "=== B: call operator ==="
+          $b = "B.exe"
+          & $exe /SFXMODE:vpnclient "/SFXOUT:$dir\$b"
+          "B.exe exists: $(Test-Path "$dir\$b")"
+          Show-State 'B'
+          Stop-Process -Name vpnsetup -Force -ErrorAction SilentlyContinue
+          if (Test-Path "$dir\$b") { "B.exe size: " + (Get-Item "$dir\$b").Length }
+
+          "=== C: cmd /c with a single string ==="
+          $c = "C.exe"
+          cmd /c "`"$exe`" /SFXMODE:vpnclient /SFXOUT:""$dir\$c"""
+          "C.exe exists: $(Test-Path "$dir\$c")"
+          Show-State 'C'
+          Stop-Process -Name vpnsetup -Force -ErrorAction SilentlyContinue
+          if (Test-Path "$dir\$c") { "C.exe size: " + (Get-Item "$dir\$c").Length }
