@@ -21,7 +21,7 @@
 // matching rule is then applied.
 
 #include "Cedar.h"
-#include "Cedar/CMInner.h"
+#include "CMInner.h"
 
 #include "netrule.h"
 
@@ -36,7 +36,7 @@ bool nr_auto_mode = false;
 #define	NR_MAX_RULES	64
 #define	NR_MONITOR_MS	5000
 
-struct NR_RULE
+typedef struct NR_RULE
 {
 	bool Enabled;
 	UINT Kind;
@@ -44,7 +44,7 @@ struct NR_RULE
 	wchar_t Gateway[64];
 	UINT Action;
 	wchar_t Target[64];
-};
+} NR_RULE;
 
 static THREAD *nr_thread = NULL;
 static volatile bool nr_stop = false;
@@ -130,7 +130,7 @@ static void NrFreeRule(NR_RULE *r)
 static LIST *NrLoadRules()
 {
 	wchar_t path[MAX_PATH];
-	wchar_t section[64], key[64], buf[2048];
+	wchar_t section[64], buf[2048];
 	LIST *o = NewListFast(NULL);
 	UINT i;
 
@@ -156,13 +156,11 @@ static LIST *NrLoadRules()
 		r->Ssids = NewListFast(NULL);
 		r->Enabled = GetPrivateProfileIntW(section, L"Enabled", 1, path) != 0;
 		r->Kind = NR_KIND_WIRELESS;
-		UniStrCpy(key, sizeof(key), L"wireless");
 		GetPrivateProfileStringW(section, L"Kind", L"wireless", buf, sizeof(buf) / sizeof(wchar_t), path);
 		if (UniStrCmpi(buf, L"wired") == 0)
 		{
 			r->Kind = NR_KIND_WIRED;
 		}
-		UniStrCpy(key, sizeof(key), L"connect");
 		GetPrivateProfileStringW(section, L"Action", L"connect", buf, sizeof(buf) / sizeof(wchar_t), path);
 		if (UniStrCmpi(buf, L"disconnect") == 0)
 		{
@@ -561,7 +559,7 @@ void NrMonitorStop()
 #define	NR_ID_ALL		2014
 #define	NR_ID_STATUS	2015
 
-struct NRW_STATE
+typedef struct NRW_STATE
 {
 	HWND hWnd;
 	HWND hList;
@@ -569,7 +567,7 @@ struct NRW_STATE
 	LIST *Rules;
 	int Current;			// selected index, -1 when none
 	bool Loading;			// true while filling the controls
-};
+} NRW_STATE;
 
 static NRW_STATE *nrw = NULL;
 
@@ -752,12 +750,6 @@ static NR_RULE *NrwNewRule(UINT kind)
 	return r;
 }
 
-// Ask for a string, used by the "pick SSID" and "use current gateway" buttons.
-static bool NrwPickFromList(HWND hWnd, wchar_t *value, UINT size)
-{
-	return false;	// replaced below
-}
-
 static void NrwOnCommand(HWND hWnd, UINT id)
 {
 	switch (id)
@@ -778,7 +770,7 @@ static void NrwOnCommand(HWND hWnd, UINT id)
 			NrFreeRule(LIST_DATA(nrw->Rules, nrw->Current));
 			Delete(nrw->Rules, LIST_DATA(nrw->Rules, nrw->Current));
 			NrwFillList();
-			NrwLoadFields(nrw->Current < (int)LIST_NUM(nrw->Rules) ? nrw->Current : LIST_NUM(nrw->Rules) - 1);
+			NrwLoadFields(nrw->Current < (int)LIST_NUM(nrw->Rules) ? nrw->Current : (int)LIST_NUM(nrw->Rules) - 1);
 			SendMessageW(nrw->hList, LB_SETCURSEL, nrw->Current, 0);
 		}
 		break;
@@ -867,7 +859,7 @@ static UINT NrwProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 	case WM_CTLCOLORSTATIC:
 		SetBkMode((HDC)wParam, TRANSPARENT);
-		return (UINT)(UINT_PTR)GetStockObject(NULL_BRUSH);
+		return 0;
 	}
 
 	return 0;
@@ -879,6 +871,7 @@ void NrRulesDialog(HWND hParent)
 	MSG msg;
 	HFONT font;
 	HWND h, x;
+	UINT i;
 	WNDCLASSW wc;
 
 	if (nrw != NULL)
@@ -911,26 +904,26 @@ void NrRulesDialog(HWND hParent)
 
 	x = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
 		WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-		10, 10, 380, 340, h, (HMENU)NR_ID_LIST, NULL, NULL);
+		10, 10, 380, 340, h, (HMENU)(UINT_PTR)NR_ID_LIST, NULL, NULL);
 	nrw->hList = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
 	x = CreateWindowExW(0, L"BUTTON", L"New Wi-Fi rule", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-		10, 356, 120, 26, h, (HMENU)NR_ID_NEW_WIFI, NULL, NULL);
+		10, 356, 120, 26, h, (HMENU)(UINT_PTR)NR_ID_NEW_WIFI, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(0, L"BUTTON", L"New wired rule", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-		136, 356, 120, 26, h, (HMENU)NR_ID_NEW_WIRE, NULL, NULL);
+		136, 356, 120, 26, h, (HMENU)(UINT_PTR)NR_ID_NEW_WIRE, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-		262, 356, 60, 26, h, (HMENU)NR_ID_DELETE, NULL, NULL);
+		262, 356, 60, 26, h, (HMENU)(UINT_PTR)NR_ID_DELETE, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-		328, 356, 62, 26, h, (HMENU)NR_ID_SAVE, NULL, NULL);
+		328, 356, 62, 26, h, (HMENU)(UINT_PTR)NR_ID_SAVE, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
 	// right hand side: the fields of the selected rule
 	x = CreateWindowExW(0, L"BUTTON", L"Rule enabled", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-		400, 12, 120, 22, h, (HMENU)NR_ID_ENABLED, NULL, NULL);
+		400, 12, 120, 22, h, (HMENU)(UINT_PTR)NR_ID_ENABLED, NULL, NULL);
 	nrw->hEnabled = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
@@ -938,11 +931,11 @@ void NrRulesDialog(HWND hParent)
 		400, 44, 350, 18, h, NULL, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-		WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 400, 64, 280, 24, h, (HMENU)NR_ID_SSIDS, NULL, NULL);
+		WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 400, 64, 280, 24, h, (HMENU)(UINT_PTR)NR_ID_SSIDS, NULL, NULL);
 	nrw->hSsids = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(0, L"BUTTON", L"Use current", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-		686, 64, 64, 24, h, (HMENU)NR_ID_PICK, NULL, NULL);
+		686, 64, 64, 24, h, (HMENU)(UINT_PTR)NR_ID_PICK, NULL, NULL);
 	nrw->hPick = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
@@ -950,11 +943,11 @@ void NrRulesDialog(HWND hParent)
 		400, 96, 350, 18, h, NULL, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-		WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 400, 116, 280, 24, h, (HMENU)NR_ID_GW, NULL, NULL);
+		WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 400, 116, 280, 24, h, (HMENU)(UINT_PTR)NR_ID_GW, NULL, NULL);
 	nrw->hGw = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(0, L"BUTTON", L"Use current", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-		686, 116, 64, 24, h, (HMENU)NR_ID_USEGW, NULL, NULL);
+		686, 116, 64, 24, h, (HMENU)(UINT_PTR)NR_ID_USEGW, NULL, NULL);
 	nrw->hUseGw = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
@@ -962,14 +955,14 @@ void NrRulesDialog(HWND hParent)
 		400, 152, 60, 18, h, NULL, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-		400, 170, 160, 120, h, (HMENU)NR_ID_ACTION, NULL, NULL);
+		400, 170, 160, 120, h, (HMENU)(UINT_PTR)NR_ID_ACTION, NULL, NULL);
 	nrw->hAction = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	SendMessageW(x, CB_ADDSTRING, 0, (LPARAM)L"Connect the connection");
 	SendMessageW(x, CB_ADDSTRING, 0, (LPARAM)L"Disconnect the connection");
 
 	x = CreateWindowExW(0, L"BUTTON", L"All connections", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-		400, 200, 160, 22, h, (HMENU)NR_ID_ALL, NULL, NULL);
+		400, 200, 160, 22, h, (HMENU)(UINT_PTR)NR_ID_ALL, NULL, NULL);
 	nrw->hAll = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
@@ -977,17 +970,17 @@ void NrRulesDialog(HWND hParent)
 		400, 228, 350, 18, h, NULL, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 	x = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-		WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 400, 248, 300, 24, h, (HMENU)NR_ID_TARGET, NULL, NULL);
+		WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 400, 248, 300, 24, h, (HMENU)(UINT_PTR)NR_ID_TARGET, NULL, NULL);
 	nrw->hTarget = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
 	x = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
-		400, 284, 350, 40, h, (HMENU)NR_ID_STATUS, NULL, NULL);
+		400, 284, 350, 40, h, (HMENU)(UINT_PTR)NR_ID_STATUS, NULL, NULL);
 	nrw->hStatus = x;
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
 	x = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-		400, 356, 80, 26, h, (HMENU)NR_ID_CLOSE, NULL, NULL);
+		400, 356, 80, 26, h, (HMENU)(UINT_PTR)NR_ID_CLOSE, NULL, NULL);
 	SendMessageW(x, WM_SETFONT, (WPARAM)font, TRUE);
 
 	NrwFillList();
@@ -1030,9 +1023,9 @@ void NrRulesDialog(HWND hParent)
 	}
 
 	NrwStoreFields();
-	for (x = 0;(UINT)x < LIST_NUM(nrw->Rules);x++)
+	for (i = 0;i < LIST_NUM(nrw->Rules);i++)
 	{
-		NrFreeRule(LIST_DATA(nrw->Rules, (UINT)x));
+		NrFreeRule(LIST_DATA(nrw->Rules, i));
 	}
 	ReleaseList(nrw->Rules);
 	Free(nrw);
