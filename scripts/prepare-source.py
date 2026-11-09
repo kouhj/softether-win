@@ -122,6 +122,42 @@ def inject(path: Path, anchor: str, addition: str, count: int = 1) -> None:
     log(f"  hooked {path.relative_to(SOURCE)}")
 
 
+def fix_blake2_sse2() -> None:
+    """Pick the BLAKE2 implementation with a plain if/else.
+
+    Upstream selects the source through a generator expression and then sets a
+    source property on it, which CMake cannot do for expressions: the HAVE_SSE2
+    definition never reaches the compiler and MSVC fails with
+    "This code requires at least SSE2.".
+    """
+    log("fixing the BLAKE2 SSE2 selection")
+    cm = SOURCE / "src" / "Cedar" / "CMakeLists.txt"
+    data = cm.read_bytes().decode("utf-8", "surrogateescape")
+
+    old = (
+        "  set(BLAKE2_SRC_PATH $<IF:$<BOOL:${HAS_SSE2}>,${TOP_DIRECTORY}/3rdparty/BLAKE2/sse,"
+        "${TOP_DIRECTORY}/3rdparty/BLAKE2/ref>)\n"
+        "  set(BLAKE2_SRC $<IF:$<BOOL:${HAS_SSE2}>,${BLAKE2_SRC_PATH}/blake2s.c,"
+        "${BLAKE2_SRC_PATH}/blake2s-ref.c>)\n"
+    )
+    data = data.replace("\r\n", "\n")
+    if data.count(old) != 1:
+        sys.exit("BLAKE2 selection not found, upstream changed")
+
+    new = (
+        "  if(HAS_SSE2)\n"
+        "    set(BLAKE2_SRC_PATH \"${TOP_DIRECTORY}/3rdparty/BLAKE2/sse\")\n"
+        "    set(BLAKE2_SRC \"${BLAKE2_SRC_PATH}/blake2s.c\")\n"
+        "  else()\n"
+        "    set(BLAKE2_SRC_PATH \"${TOP_DIRECTORY}/3rdparty/BLAKE2/ref\")\n"
+        "    set(BLAKE2_SRC \"${BLAKE2_SRC_PATH}/blake2s-ref.c\")\n"
+        "  endif()\n"
+    )
+    data = data.replace(old, new)
+    cm.write_bytes(data.replace("\n", "\r\n").encode("utf-8", "surrogateescape"))
+    log("  blake2 source is now a concrete path, HAVE_SSE2 reaches the compiler")
+
+
 def install_feature() -> None:
     log("installing the netrule feature")
     for name in ("netrule.c", "netrule.h"):
@@ -193,6 +229,7 @@ def main() -> None:
     if re.search(r"^\s*is_restricted = SiIsEnterpriseFunctionsRestrictedOnOpenSource", server_c, re.M):
         sys.exit("is_restricted is still assigned")
 
+    fix_blake2_sse2()
     install_feature()
     log("done")
 
