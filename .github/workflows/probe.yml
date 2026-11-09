@@ -5,6 +5,7 @@ jobs:
   probe:
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Get the tools from the last successful build
         uses: actions/download-artifact@v4
         with:
@@ -12,32 +13,42 @@ jobs:
           path: out
           run-id: 42617987144
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Watch the generator work
+      - name: Compare with the official installer
         shell: pwsh
         run: |
-          $exe = (Resolve-Path out\vpnsetup.exe).Path
-          $dir = Split-Path -Parent $exe
-          Set-Location $dir
-          $temp = $env:TEMP
-          "temp is $temp"
-
-          Start-Process -FilePath $exe -ArgumentList @('/SFXMODE:vpnclient', "/SFXOUT:$dir\A.exe") `
-            -WorkingDirectory $dir -PassThru | Out-Null
-
-          for ($i = 1; $i -le 36; $i++) {
-            Start-Sleep -Seconds 10
-            $f = Get-ChildItem $temp -Filter setup.exe -Recurse -File -ErrorAction SilentlyContinue |
-              Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            $size = if ($f) { '{0:N0}' -f $f.Length } else { '-' }
-            $out = Test-Path "$dir\A.exe"
-            '{0,4}s  temp/setup.exe={1,12}  A.exe={2}' -f ($i * 10), $size, $out
-            if ($out) { break }
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class R {
+            public delegate bool Proc(IntPtr m, IntPtr t, IntPtr n, IntPtr p);
+            [DllImport("kernel32", CharSet = CharSet.Unicode)] public static extern IntPtr LoadLibraryExW(string f, IntPtr h, uint fl);
+            [DllImport("kernel32")] public static extern bool FreeLibrary(IntPtr m);
+            [DllImport("kernel32", CharSet = CharSet.Unicode)] public static extern bool EnumResourceNamesW(IntPtr m, string t, Proc p, IntPtr l);
+            [DllImport("kernel32", CharSet = CharSet.Ansi)] public static extern IntPtr FindResourceA(IntPtr m, string n, string t);
+            [DllImport("kernel32")] public static extern uint SizeofResource(IntPtr m, IntPtr r);
+          }
+          '@
+          function Get-Resources($exe) {
+            $names = [System.Collections.Generic.List[string]]::new()
+            $cb = [R+Proc] {
+              param($m, $t, $n, $p)
+              if ($n.ToInt64() -gt 0xFFFF) { $names.Add([Runtime.InteropServices.Marshal]::PtrToStringUni($n)) }
+              return $true
+            }
+            $h = [R]::LoadLibraryExW($exe, [IntPtr]::Zero, 2)
+            if ($h -eq [IntPtr]::Zero) { throw "cannot open $exe" }
+            [void][R]::EnumResourceNamesW($h, 'DATAFILE', $cb, [IntPtr]::Zero)
+            foreach ($n in $names) {
+              $r = [R]::FindResourceA($h, $n, 'DATAFILE')
+              '{0,-24} {1,12:N0}' -f $n, [R]::SizeofResource($h, $r)
+            }
+            [void][R]::FreeLibrary($h)
           }
 
-          Get-Process vpnsetup -ErrorAction SilentlyContinue |
-            Select-Object Id, Responding, MainWindowTitle, CPU, Handles,
-              @{n = 'Threads'; e = { $_.Threads.Count } } | Format-List | Out-String
-          Get-CimInstance Win32_Process -Filter "name='vpnsetup.exe'" |
-            Select-Object CommandLine | Format-List | Out-String
-          if (Test-Path "$dir\A.exe") { 'A.exe size: ' + (Get-Item "$dir\A.exe").Length }
-          Stop-Process -Name vpnsetup -Force -ErrorAction SilentlyContinue
+          "=== official softether-vpnclient-5.02.5187.x64.exe ==="
+          Invoke-WebRequest -Uri https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe -OutFile official.exe
+          Get-Resources (Resolve-Path official.exe).Path
+
+          "=== built here ==="
+          ./scripts/build-installers.ps1 -Version 5.2.5189 -BinDir out -OutDir dist
+          Get-Resources (Resolve-Path dist\softether-vpnclient-5.02.5189.x64.exe).Path
