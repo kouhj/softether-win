@@ -167,8 +167,8 @@ def install_feature() -> None:
     inject(
         SOURCE / "src" / "Cedar" / "CMakeLists.txt",
         "target_link_libraries(cedar PUBLIC mayaqua)",
-        "\n\nif(WIN32)\n  # used by the network rule monitor (WLAN API and route table)\n"
-        "  target_link_libraries(cedar PUBLIC wlanapi iphlpapi)\nendif()",
+        "\n\nif(WIN32)\n  # used by the network rule monitor (route table)\n"
+        "  target_link_libraries(cedar PUBLIC iphlpapi)\nendif()",
     )
 
 
@@ -176,8 +176,14 @@ def main() -> None:
     fetch()
 
     patches = sorted((ROOT / "patches").glob("*.patch"))
-    if not (SOURCE / "src" / "Cedar" / "netrule.c").is_file() and not patches:
-        sys.exit("nothing to do")
+    prepared = (SOURCE / "src" / "Cedar" / "netrule.c").is_file()
+
+    if prepared:
+        # a local re-run: refresh the feature files, the hooks are already there
+        log("source/ is already prepared, only refreshing the feature files")
+        for name in ("netrule.c", "netrule.h"):
+            shutil.copy2(ROOT / "feature" / name, SOURCE / "src" / "Cedar" / name)
+        return
 
     for patch in patches:
         apply_patch(patch)

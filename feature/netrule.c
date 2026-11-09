@@ -22,10 +22,10 @@
 
 #include "Cedar.h"
 #include "CMInner.h"
+#include "WinUi.h"
 
 #include "netrule.h"
 
-#include <wlanapi.h>
 #include <iphlpapi.h>
 #include <iptypes.h>
 #include <shlobj.h>
@@ -61,9 +61,33 @@ static void NrIniPath(wchar_t *path, UINT size)
 	}
 	UniStrCpy(path, size, dir);
 	UniStrCat(path, size, L"\\SoftEther VPN Client");
-	MakeDir(path);
+	MakeDirW(path);
 	UniStrCat(path, size, L"\\");
 	UniStrCat(path, size, NR_INI_FILE);
+}
+
+// wcsstr without pulling the CRT in
+static wchar_t *NrStrStr(wchar_t *hay, wchar_t *needle)
+{
+	wchar_t *p, *q, *r;
+
+	if (hay == NULL || needle == NULL || needle[0] == 0)
+	{
+		return NULL;
+	}
+
+	for (p = hay;*p != 0;p++)
+	{
+		for (q = p, r = needle;*r != 0 && *q == *r;q++, r++)
+		{
+		}
+		if (*r == 0)
+		{
+			return p;
+		}
+	}
+
+	return NULL;
 }
 
 static bool NrSsidInRule(NR_RULE *r, wchar_t *ssid)
@@ -91,7 +115,7 @@ static void NrAddSsid(NR_RULE *r, wchar_t *ssid)
 {
 	wchar_t *s;
 
-	if (r == NULL || IsEmptyStr(ssid))
+	if (r == NULL || IsEmptyUniStr(ssid))
 	{
 		return;
 	}
@@ -143,7 +167,7 @@ static LIST *NrLoadRules()
 
 		UniFormat(section, sizeof(section), L"rule%u", i);
 		GetPrivateProfileStringW(section, L"Action", L"", buf, sizeof(buf) / sizeof(wchar_t), path);
-		if (IsEmptyStr(buf))
+		if (IsEmptyUniStr(buf))
 		{
 			if (i > 0)
 			{
@@ -186,7 +210,7 @@ static LIST *NrLoadRules()
 				item[n++] = *p++;
 			}
 			item[n] = 0;
-			Trim(item);
+			UniTrim(item);
 			NrAddSsid(r, item);
 		}
 
@@ -237,13 +261,51 @@ static void NrSaveRules(LIST *rules)
 }
 
 // --------------------------------------------------------------- net probes
+// Run a command without showing a console window and wait for it.
+static bool NrRunHidden(wchar_t *cmdline)
+{
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+	DWORD wait;
+	bool ok = false;
+
+	Zero(&si, sizeof(si));
+	si.cb = sizeof(si);
+	Zero(&pi, sizeof(pi));
+
+	if (CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi) == false)
+	{
+		return false;
+	}
+
+	wait = WaitForSingleObject(pi.hProcess, 15000);
+	ok = (wait == WAIT_OBJECT_0);
+
+	CloseHandle(pi.hProcess);
+	CloseHandle(pi.hThread);
+
+	return ok;
+}
+
 // The SSID of the wireless link Windows is currently connected to.
+//
+// The WLAN API would be the natural source, but wlanapi.h pulls windot11.h in,
+// which does not compile against the current Windows SDK in this project (a
+// missing NDIS_OBJECT_HEADER), so the state is read from
+// "netsh wlan show interfaces" instead. The output is captured as UTF-8 so
+// non-ASCII SSIDs survive, and the result is cached for a few seconds because
+// the monitor asks for it on every tick.
+#define	NR_SSID_CACHE_MS	4000
+
 bool NrGetCurrentSsid(wchar_t *ssid, UINT size)
 {
-	HANDLE h = NULL;
-	DWORD ver = 0, size2 = 0, ret;
-	PWLAN_INTERFACE_INFO_LIST list = NULL;
-	UINT i;
+	static DWORD last_tick = 0;
+	static wchar_t cached[128] = L"";
+	wchar_t dir[MAX_PATH], path[MAX_PATH], cmd[MAX_PATH + 128];
+	wchar_t text[4096];
+	BYTE raw[8192];
+	HANDLE h;
+	DWORD got, total = 0, now;
 	bool ok = false;
 
 	if (ssid == NULL || size == 0)
@@ -252,51 +314,91 @@ bool NrGetCurrentSsid(wchar_t *ssid, UINT size)
 	}
 	ssid[0] = 0;
 
-	if (WlanOpenHandle(2, NULL, &ver, &h) != ERROR_SUCCESS)
+	now = GetTickCount();
+	if (last_tick != 0 && now - last_tick < NR_SSID_CACHE_MS)
+	{
+		UniStrCpy(ssid, size, cached);
+		return cached[0] != 0;
+	}
+	last_tick = now;
+	cached[0] = 0;
+
+	if (SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, 0, dir) != S_OK)
+	{
+		return false;
+	}
+	UniStrCpy(path, sizeof(path), dir);
+	UniStrCat(path, sizeof(path), L"\\SoftEther VPN Client");
+	MakeDirW(path);
+	UniStrCat(path, sizeof(path), L"\\nr_ssid.txt");
+	DeleteFileW(path);
+
+	// chcp 65001 first, netsh would otherwise print in the OEM code page
+	UniFormat(cmd, sizeof(cmd), L"cmd.exe /c chcp 65001 >nul & netsh wlan show interfaces > \"%s\"", path);
+	if (NrRunHidden(cmd) == false)
 	{
 		return false;
 	}
 
-	if (WlanEnumInterfaces(h, NULL, &list) == ERROR_SUCCESS && list != NULL)
+	h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE)
 	{
-		for (i = 0;i < list->dwNumberOfItems;i++)
+		return false;
+	}
+	while (total < sizeof(raw) - 1)
+	{
+		if (ReadFile(h, raw + total, (DWORD)(sizeof(raw) - 1 - total), &got, NULL) == false || got == 0)
 		{
-			PWLAN_INTERFACE_INFO info = &list->InterfaceInfo[i];
-			PWLAN_CONNECTION_ATTRIBUTES attr = NULL;
+			break;
+		}
+		total += got;
+	}
+	CloseHandle(h);
+	DeleteFileW(path);
+	raw[total] = 0;
 
-			if (info->isState != wlan_interface_state_connected)
+	Zero(text, sizeof(text));
+	if (Utf8ToUni(text, sizeof(text), raw, total) > 0 && text[0] != 0)
+	{
+		wchar_t *line, *p;
+
+		// one "key : value" line at a time
+		line = text;
+		while (line != NULL && *line != 0)
+		{
+			wchar_t *eol = NrStrStr(line, L"\n");
+
+			if (eol != NULL)
 			{
-				continue;
-			}
-			if (WlanQueryInterface(h, &info->InterfaceGuid, wlan_intf_opcode_current_connection,
-				NULL, &size2, (PVOID *)&attr, NULL) != ERROR_SUCCESS || attr == NULL)
-			{
-				continue;
+				*eol = 0;
 			}
 
-			if (attr->isState == wlan_interface_state_connected && attr->wlanAssociationAttributes.dot11Ssid.uSSIDLength > 0)
+			if (NrStrStr(line, L"SSID") != NULL && NrStrStr(line, L"BSSID") == NULL)
 			{
-				char tmp[64];
-				UINT n = attr->wlanAssociationAttributes.dot11Ssid.uSSIDLength;
-				if (n > sizeof(tmp) - 1)
+				p = NrStrStr(line, L":");
+				if (p != NULL)
 				{
-					n = sizeof(tmp) - 1;
+					p++;
+					UniTrim(p);
+					if (p[0] != 0)
+					{
+						UniStrCpy(cached, sizeof(cached), p);
+						ok = true;
+						break;
+					}
 				}
-				Copy(tmp, attr->wlanAssociationAttributes.dot11Ssid.ucSSID, n);
-				tmp[n] = 0;
-				Utf8ToUni(ssid, size, tmp);
-				ok = true;
 			}
-			WlanFreeMemory(attr);
-			if (ok)
+
+			if (eol == NULL)
 			{
 				break;
 			}
+			*eol = L'\n';		// restore, the pointer advances past the newline
+			line = eol + 1;
 		}
-		WlanFreeMemory(list);
 	}
 
-	WlanCloseHandle(h, NULL);
+	UniStrCpy(ssid, size, cached);
 	return ok;
 }
 
@@ -418,7 +520,7 @@ static void NrApplyToConnections(bool connect, wchar_t *only)
 			continue;
 		}
 
-		if (IsEmptyStr(only) == false && UniStrCmpi(only, name) != 0)
+		if (IsEmptyUniStr(only) == false && UniStrCmpi(only, name) != 0)
 		{
 			Free(name);
 			Free(state);
@@ -463,8 +565,39 @@ void NrApplyRules()
 		return;
 	}
 
-	NrGetCurrentSsid(ssid, sizeof(ssid));
-	NrGetWiredGateway(gw, sizeof(gw));
+	// only probe the link type the rules actually ask for
+	{
+		UINT i;
+		bool need_wifi = false, need_wired = false;
+
+		for (i = 0;i < LIST_NUM(rules);i++)
+		{
+			NR_RULE *r = LIST_DATA(rules, i);
+			if (r->Enabled == false)
+			{
+				continue;
+			}
+			if (r->Kind == NR_KIND_WIRELESS)
+			{
+				need_wifi = true;
+			}
+			else
+			{
+				need_wired = true;
+			}
+		}
+
+		ssid[0] = 0;
+		gw[0] = 0;
+		if (need_wifi)
+		{
+			NrGetCurrentSsid(ssid, sizeof(ssid));
+		}
+		if (need_wired)
+		{
+			NrGetWiredGateway(gw, sizeof(gw));
+		}
+	}
 
 	if (LIST_NUM(rules) > 0 && (ssid[0] != 0 || gw[0] != 0))
 	{
@@ -597,7 +730,7 @@ static void NrwFillList()
 				r->Enabled ? L"(on)" : L"(off)",
 				ssids,
 				r->Action == NR_ACTION_CONNECT ? L"connect" : L"disconnect",
-				IsEmptyStr(r->Target) ? L"ALL" : r->Target);
+				IsEmptyUniStr(r->Target) ? L"ALL" : r->Target);
 		}
 		else
 		{
@@ -605,7 +738,7 @@ static void NrwFillList()
 				r->Enabled ? L"(on)" : L"(off)",
 				r->Gateway,
 				r->Action == NR_ACTION_CONNECT ? L"connect" : L"disconnect",
-				IsEmptyStr(r->Target) ? L"ALL" : r->Target);
+				IsEmptyUniStr(r->Target) ? L"ALL" : r->Target);
 		}
 		SendMessageW(nrw->hList, LB_ADDSTRING, 0, (LPARAM)line);
 	}
@@ -646,8 +779,8 @@ static void NrwLoadFields(int index)
 	SendMessageW(nrw->hEnabled, BM_SETCHECK, r->Enabled ? BST_CHECKED : BST_UNCHECKED, 0);
 	SendMessageW(nrw->hAction, CB_SETCURSEL, r->Action == NR_ACTION_CONNECT ? 0 : 1, 0);
 	SetWindowTextW(nrw->hTarget, r->Target);
-	SendMessageW(nrw->hAll, BM_SETCHECK, IsEmptyStr(r->Target) ? BST_CHECKED : BST_UNCHECKED, 0);
-	EnableWindow(nrw->hTarget, IsEmptyStr(r->Target) ? FALSE : TRUE);
+	SendMessageW(nrw->hAll, BM_SETCHECK, IsEmptyUniStr(r->Target) ? BST_CHECKED : BST_UNCHECKED, 0);
+	EnableWindow(nrw->hTarget, IsEmptyUniStr(r->Target) ? FALSE : TRUE);
 
 	if (r->Kind == NR_KIND_WIRELESS)
 	{
@@ -698,9 +831,9 @@ static void NrwStoreFields()
 	r->Enabled = SendMessageW(nrw->hEnabled, BM_GETCHECK, 0, 0) == BST_CHECKED;
 	r->Action = SendMessageW(nrw->hAction, CB_GETCURSEL, 0, 0) == 0 ? NR_ACTION_CONNECT : NR_ACTION_DISCONNECT;
 	GetWindowTextW(nrw->hTarget, r->Target, sizeof(r->Target) / sizeof(wchar_t));
-	Trim(r->Target);
+	UniTrim(r->Target);
 
-	if (IsEmptyStr(r->Target))
+	if (IsEmptyUniStr(r->Target))
 	{
 		r->Target[0] = 0;
 	}
@@ -729,14 +862,14 @@ static void NrwStoreFields()
 				item[k++] = *p++;
 			}
 			item[k] = 0;
-			Trim(item);
+			UniTrim(item);
 			NrAddSsid(r, item);
 		}
 	}
 	else
 	{
 		GetWindowTextW(nrw->hGw, r->Gateway, sizeof(r->Gateway) / sizeof(wchar_t));
-		Trim(r->Gateway);
+		UniTrim(r->Gateway);
 	}
 }
 
