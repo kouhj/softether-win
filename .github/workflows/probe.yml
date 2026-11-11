@@ -34,6 +34,29 @@ jobs:
               public static extern bool CloseHandle(IntPtr h);
               [DllImport("kernel32.dll", SetLastError = true)]
               public static extern bool GetThreadContext(IntPtr hThread, IntPtr lpContext);
+              [DllImport("dbghelp.dll", SetLastError = true)]
+              public static extern uint SymSetOptions(uint options);
+              [DllImport("dbghelp.dll", SetLastError = true)]
+              public static extern bool SymInitialize(IntPtr hProcess, string path, bool invade);
+              [DllImport("dbghelp.dll", SetLastError = true)]
+              public static extern bool SymFromAddr(IntPtr hProcess, ulong address, out ulong disp, IntPtr symbol);
+
+              public static string Name(IntPtr process, ulong address)
+              {
+                  IntPtr buf = Marshal.AllocHGlobal(88 + 2048);
+                  try
+                  {
+                      for (int i = 0; i < 88; i++) Marshal.WriteByte(buf, i, 0);
+                      Marshal.WriteInt32(buf, 0, 88);
+                      Marshal.WriteInt32(buf, 80, 2000);
+                      ulong disp;
+                      if (!SymFromAddr(process, address, out disp, buf))
+                          return "?" + Marshal.GetLastWin32Error();
+                      return Marshal.PtrToStringAnsi(new IntPtr(buf.ToInt64() + 84)) + "+0x" + disp.ToString("x");
+                  }
+                  finally { Marshal.FreeHGlobal(buf); }
+              }
+
               [DllImport("kernel32.dll", SetLastError = true)]
               public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, IntPtr size, out IntPtr read);
 
@@ -91,11 +114,23 @@ jobs:
           "cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s running-thread=$($t.Id)"
           $w = [Tool]::Where([uint32]$t.Id)
           "rip=$(Resolve $p ([long]$w[0])) rsp=0x$($w[1].ToString('x'))"
+          [Tool]::SymSetOptions(0x00000002 -bor 0x00000004) | Out-Null
+          $ok = [Tool]::SymInitialize($p.Handle, 'srv*C:\sym*https://msdl.microsoft.com/download/symbols', $true)
+          "syminitialize=$ok"
+          "symbols:"
+          foreach ($a in @([long]$w[0], $words0 = 0)) { }
+          $symbolise = @([long]$w[0])
           $words = [Tool]::Read($p.Handle, $w[1], 128)
+          $symbolise += ($words | Where-Object { $_ -gt 0 } | Select-Object -First 8)
           $seen = 0
           for ($i = 0; $i -lt $words.Length; $i++) {
             $r = Resolve $p $words[$i]
-            if ($r) { "  [rsp+0x{0:x}] {1}" -f ($i * 8), $r; $seen++ }
+            if ($r) {
+              $sym = ''
+              if ($words[$i] -lt 0x800000000000 -and ([long]$words[$i]) -gt 0) { $sym = [Tool]::Name($p.Handle, [uint64]$words[$i]) }
+              "  [rsp+0x{0:x}] {1} {2}" -f ($i * 8), $r, $sym
+              $seen++
+            }
             if ($seen -ge 14) { break }
           }
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
