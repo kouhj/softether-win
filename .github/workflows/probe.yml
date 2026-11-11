@@ -62,7 +62,7 @@ jobs:
           }
           '@
 
-          function Where($p, [ulong]$address) {
+          function Resolve($p, [ulong]$address) {
             foreach ($m in $p.Modules) {
               $b = [uint64]$m.BaseAddress.ToInt64()
               if ($address -ge $b -and $address -lt $b + [uint64]$m.ModuleMemorySize) {
@@ -79,7 +79,7 @@ jobs:
           "cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s thread=$($t.Id)"
           $hits = @{}
           for ($i = 0; $i -lt 400; $i++) {
-            $where = Where $p ([Tool]::Rip([uint32]$t.Id))
+            $where = Resolve $p ([Tool]::Rip([uint32]$t.Id))
             if ($where) { if ($hits.ContainsKey($where)) { $hits[$where]++ } else { $hits[$where] = 1 } }
             Start-Sleep -Milliseconds 2
           }
