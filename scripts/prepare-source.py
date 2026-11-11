@@ -208,6 +208,30 @@ def patch_sfx_dialog() -> None:
     )
 
 
+def fix_hamcore_outputs() -> None:
+    """Keep PenCore.dll and vpndrvinst.exe at the root of the hamcore archive.
+
+    A multi-configuration generator such as Visual Studio appends the
+    configuration name to RUNTIME_OUTPUT_DIRECTORY, so the two files landed in
+    src/bin/hamcore/Release and hamcorebuilder packed them as
+    "Release/PenCore.dll".  The installer looks up "|PenCore.dll" from the
+    archive root, fails to load it and never shows its wizard.  An empty
+    generator expression keeps the configuration suffix out of the path.
+    """
+    log("fixing the hamcore staging directories")
+    needle = 'RUNTIME_OUTPUT_DIRECTORY "${TOP_DIRECTORY}/src/bin/hamcore"'
+    replacement = 'RUNTIME_OUTPUT_DIRECTORY "${TOP_DIRECTORY}/src/bin/hamcore/$<0:>"'
+    for name in ("PenCore", "vpndrvinst"):
+        cmake = SOURCE / "src" / name / "CMakeLists.txt"
+        with open(cmake, encoding="utf-8", newline="") as stream:
+            text = stream.read()
+        if text.count(needle) != 1:
+            raise SystemExit(f"unexpected RUNTIME_OUTPUT_DIRECTORY in {cmake}")
+        with open(cmake, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text.replace(needle, replacement))
+        log(f"  {name} writes into src/bin/hamcore without a configuration folder")
+
+
 def trace_setup_flow() -> None:
     """Write the setup wizard milestones to the file named by SOFTETHER_SETUP_TRACE."""
     log("instrumenting the setup flow")
@@ -350,6 +374,7 @@ def main() -> None:
 
     patch_sfx_dialog()
     trace_setup_flow()
+    fix_hamcore_outputs()
 
     patches = sorted((ROOT / "patches").glob("*.patch"))
     prepared = (SOURCE / "src" / "Cedar" / "netrule.c").is_file()

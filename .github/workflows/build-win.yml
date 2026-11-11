@@ -81,6 +81,15 @@ jobs:
           if ($missing.Count -gt 0) { throw "missing in vpncmgr.exe: $($missing -join ', ')" }
           "all feature strings are present in vpncmgr.exe"
 
+      - name: Check the hamcore staging directory
+        shell: pwsh
+        run: |
+          foreach ($name in @('PenCore.dll', 'vpndrvinst.exe')) {
+            if (-not (Test-Path "source/src/bin/hamcore/$name")) { throw "$name is not in the hamcore root" }
+            "hamcore root has $name"
+          }
+          if (Test-Path 'source/src/bin/hamcore/Release') { throw 'the hamcore staging directory has a configuration folder' }
+
       - name: Collect the binaries
         run: |
           # an allowlist: the build tree also holds CMake probes such as
