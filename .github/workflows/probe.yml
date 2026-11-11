@@ -15,103 +15,48 @@ jobs:
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
-      - name: Compare the extracted setup programs
+      - name: Decode the payload ourselves
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
           using System;
-          using System.Text;
           using System.Collections.Generic;
           using System.Runtime.InteropServices;
 
-          public class Win
+          public class Res
           {
-              public delegate bool Proc(IntPtr h, IntPtr l);
-              [DllImport("user32.dll")] public static extern bool EnumWindows(Proc p, IntPtr l);
-              [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-              [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-
-              public static IntPtr Find(uint pid, string cls)
-              {
-                  IntPtr found = IntPtr.Zero;
-                  EnumWindows((h, l) =>
-                  {
-                      uint p;
-                      GetWindowThreadProcessId(h, out p);
-                      if (p == pid)
-                      {
-                          var c = new StringBuilder(256);
-                          GetClassNameW(h, c, 256);
-                          if (c.ToString() == cls) { found = h; return false; }
-                      }
-                      return true;
-                  }, IntPtr.Zero);
-                  return found;
-              }
-
-              public static string Dump(uint pid)
-              {
-                  var list = new List<string>();
-                  EnumWindows((h, l) =>
-                  {
-                      uint p;
-                      GetWindowThreadProcessId(h, out p);
-                      if (p == pid)
-                      {
-                          var c = new StringBuilder(256);
-                          var t = new StringBuilder(256);
-                          GetClassNameW(h, c, 256);
-                          GetWindowTextW(h, t, 256);
-                          list.Add(c.ToString() + " | " + t.ToString() + " | visible=" + IsWindowVisible(h));
-                      }
-                      return true;
-                  }, IntPtr.Zero);
-                  return list.Count == 0 ? "no window" : string.Join(" ;; ", list);
-              }
+              public delegate bool EnumProc(IntPtr h, IntPtr type, IntPtr name, IntPtr param);
+              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              public static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+              [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+              public static extern bool EnumResourceNamesA(IntPtr h, string type, EnumProc proc, IntPtr param);
+              [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+              public static extern IntPtr FindResourceA(IntPtr h, string name, string type);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              public static extern uint SizeofResource(IntPtr h, IntPtr res);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              public static extern IntPtr LoadResource(IntPtr h, IntPtr res);
+              [DllImport("kernel32.dll")]
+              public static extern IntPtr LockResource(IntPtr data);
           }
           '@
-          # 1. the official child wizard
-          $official = Start-Process -FilePath 'probe\official.exe' -PassThru
-          Start-Sleep -Seconds 3
-          $c1 = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($official.Id)" | Select-Object -First 1
-          if ($c1) {
-            Start-Sleep -Seconds 2
-            "official child: $($c1.Name) -> $([Win]::Dump([uint32]$c1.ProcessId))"
+          $h = [Res]::LoadLibraryExW((Resolve-Path 'probe\ours.exe').Path, [IntPtr]::Zero, 2)
+          if ($h -eq [IntPtr]::Zero) { throw "cannot load the installer: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+          $names = [System.Collections.Generic.List[string]]::new()
+          [Res]::EnumResourceNamesA($h, 'DATAFILE', { param($m, $t, $n, $l) $names.Add($n); return $true }, [IntPtr]::Zero) | Out-Null
+          foreach ($name in $names) {
+            $res = [Res]::FindResourceA($h, $name, 'DATAFILE')
+            $size = [Res]::SizeofResource($h, $res)
+            $data = [Res]::LoadResource($h, $res)
+            $locked = [Res]::LockResource($data)
+            $bytes = [byte[]]::new($size)
+            [Runtime.InteropServices.Marshal]::Copy($locked, $bytes, 0, $size)
+            if ($name -like 'RAW_*') { "resource $name raw $size"; continue }
+            $declared = [BitConverter]::ToUInt32($bytes, 0)
+            $ms = [System.IO.MemoryStream]::new($bytes, 4, $bytes.Length - 4)
+            $z = [System.IO.Compression.ZLibStream]::new($ms, [System.IO.Compression.CompressionMode]::Decompress)
+            $out = [System.IO.MemoryStream]::new()
+            try { $z.CopyTo($out); "resource $name declared=$declared decoded=$($out.Length)" }
+            catch { "resource $name declared=$declared FAILED: $($_.Exception.InnerException.Message) $($_.Exception.Message)" }
+            $z.Dispose()
           }
-          Stop-Process -Id $official.Id -Force -ErrorAction SilentlyContinue
-          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep -Seconds 2
-          $official_dir = (Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory | Select-Object -First 1).FullName
-          "official temp: $official_dir"
-          # 2. the official setup program run directly
-          $o = Start-Process -FilePath (Join-Path $official_dir 'vpnsetup.exe') -WorkingDirectory $official_dir -PassThru
-          Start-Sleep -Seconds 5
-          "official direct: cpu=$([math]::Round($o.TotalProcessorTime.TotalSeconds,2)) exited=$($o.HasExited) -> $([Win]::Dump([uint32]$o.Id))"
-          Stop-Process -Id $o.Id -Force -ErrorAction SilentlyContinue
-          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
-          Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
-          # 3. extract our payload and run our setup program
-          $ours = Start-Process -FilePath 'probe\ours.exe' -PassThru
-          Start-Sleep -Seconds 2
-          [Win]::PostMessage([Win]::Find([uint32]$ours.Id, '#32770'), 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
-          Start-Sleep -Seconds 4
-          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
-          Stop-Process -Id $ours.Id -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
-          $ours_dir = (Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory | Select-Object -First 1).FullName
-          "ours temp: $ours_dir"
-          $v = Start-Process -FilePath (Join-Path $ours_dir 'vpncmd.exe') -ArgumentList 'localhost','/CMD','Version' -WorkingDirectory (Join-Path (Get-Location) 'probe') -RedirectStandardOutput 'probe\vpncmd.out' -RedirectStandardError 'probe\vpncmd.err' -PassThru -NoNewWindow
-          $v.WaitForExit(20000) | Out-Null
-          "vpncmd exit=$($v.ExitCode)"
-          "vpncmd out: $((Get-Content 'probe\vpncmd.out' -ErrorAction SilentlyContinue) -join ' / ')"
-          "vpncmd err: $((Get-Content 'probe\vpncmd.err' -ErrorAction SilentlyContinue) -join ' / ')"
-          $w = Start-Process -FilePath (Join-Path $ours_dir 'vpnsetup.exe') -WorkingDirectory $ours_dir -PassThru
-          for ($i = 0; $i -lt 6; $i++) {
-            Start-Sleep -Seconds 2
-            $w.Refresh()
-            "ours setup t=$($i*2+2) cpu=$([math]::Round($w.TotalProcessorTime.TotalSeconds,2)) exited=$($w.HasExited) -> $([Win]::Dump([uint32]$w.Id))"
-          }
-          Stop-Process -Id $w.Id -Force -ErrorAction SilentlyContinue
