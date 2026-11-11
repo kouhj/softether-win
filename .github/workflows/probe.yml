@@ -15,12 +15,13 @@ jobs:
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
-      - name: Compare the two exes
+      - name: Build the variants
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
           using System;
           using System.IO;
+          using System.Collections.Generic;
           using System.Runtime.InteropServices;
 
           public class Res
@@ -32,38 +33,71 @@ jobs:
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern IntPtr FindResourceA(IntPtr module, IntPtr name, IntPtr type);
               [DllImport("kernel32.dll", SetLastError = true)]
-              static extern IntPtr FindResourceW(IntPtr module, IntPtr name, IntPtr type);
-              [DllImport("kernel32.dll", SetLastError = true)]
               static extern IntPtr LoadResource(IntPtr module, IntPtr res);
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern IntPtr LockResource(IntPtr data);
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern uint SizeofResource(IntPtr module, IntPtr res);
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+              static extern IntPtr BeginUpdateResourceW(string file, bool delete);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool UpdateResourceA(IntPtr update, string type, string name, ushort lang, byte[] data, uint size);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool UpdateResourceI(IntPtr update, IntPtr type, IntPtr name, ushort lang, byte[] data, uint size);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool EndUpdateResourceW(IntPtr update, bool discard);
+              [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "EnumResourceNamesA")]
+              static extern bool EnumResourceNamesH(IntPtr module, string type, Proc p, IntPtr l);
 
-              public static string Dump(string path, int id, int type)
+              public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
+
+              public static List<string> Names(string path, string type)
+              {
+                  var list = new List<string>();
+                  IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
+                  EnumResourceNamesH(h, type, (m, t, n, l) => { list.Add(Marshal.PtrToStringAnsi(n)); return true; }, IntPtr.Zero);
+                  FreeLibrary(h);
+                  return list;
+              }
+
+              public static byte[] ById(string path, int id, int type)
               {
                   IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
                   IntPtr r = FindResourceA(h, (IntPtr)id, (IntPtr)type);
-                  if (r == IntPtr.Zero) { FreeLibrary(h); return "missing"; }
+                  if (r == IntPtr.Zero) { FreeLibrary(h); return null; }
                   uint size = SizeofResource(h, r);
                   byte[] buf = new byte[size];
                   Marshal.Copy(LockResource(LoadResource(h, r)), buf, 0, (int)size);
                   FreeLibrary(h);
-                  return size + " bytes sha256=" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(buf)).Substring(0, 16);
+                  return buf;
+              }
+
+              public static void SetBlob(string file, int id, int type, byte[] data)
+              {
+                  IntPtr u = BeginUpdateResourceW(file, false);
+                  if (!UpdateResourceI(u, (IntPtr)type, (IntPtr)id, 0, data, (uint)data.Length)) throw new Exception("update failed");
+                  if (!EndUpdateResourceW(u, false)) throw new Exception("end update failed");
+              }
+
+              public static void DeleteDatafile(string file, string name)
+              {
+                  IntPtr u = BeginUpdateResourceW(file, false);
+                  if (!UpdateResourceA(u, "DATAFILE", name, 0, null, 0)) throw new Exception("delete failed " + name);
+                  if (!EndUpdateResourceW(u, false)) throw new Exception("end update failed");
               }
           }
           '@
-          foreach ($f in @('probe\ours.exe', 'probe\official.exe')) {
-            $p = (Resolve-Path $f).Path
-            $i = Get-Item $p
-            $sig = (Get-AuthenticodeSignature $p).Status
-            "{0}: size={1} modified={2:yyyy-MM-dd} sig={3}" -f $i.Name, $i.Length, $i.LastWriteTime, $sig
-            "  manifest(24,id1)=$([Res]::Dump($p, 1, 24))"
-            "  dialog(5,10002)=$([Res]::Dump($p, 10002, 5))"
-            "  version(16,id1)=$([Res]::Dump($p, 1, 16))"
-          }
+          $ours = (Resolve-Path 'probe\ours.exe').Path
+          $official = (Resolve-Path 'probe\official.exe').Path
+          Copy-Item $ours 'probe\v2-official-manifest.exe'
+          [Res]::SetBlob((Resolve-Path 'probe\v2-official-manifest.exe').Path, 1, 24, [Res]::ById($official, 1, 24))
+          Copy-Item $ours 'probe\v3-no-datafile.exe'
+          foreach ($n in [Res]::Names($ours, 'DATAFILE')) { [Res]::DeleteDatafile((Resolve-Path 'probe\v3-no-datafile.exe').Path, $n) }
+          "ours datafile entries: $(([Res]::Names($ours, 'DATAFILE')) -join ',')"
+          "v3 datafile entries: $(([Res]::Names((Resolve-Path 'probe\v3-no-datafile.exe'), 'DATAFILE')) -join ',')"
+          "v2 manifest: $(([Res]::ById((Resolve-Path 'probe\v2-official-manifest.exe'), 1, 24)).Length) bytes"
 
-      - name: Run ours three times
+      - name: Run them
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -115,7 +149,6 @@ jobs:
             "=== $([IO.Path]::GetFileName($exe))"
             $trace
           }
-          Run 'probe\ours.exe'
-          Run 'probe\ours.exe'
+          Run 'probe\v2-official-manifest.exe'
+          Run 'probe\v3-no-datafile.exe'
           Run 'probe\official.exe'
-          Run 'probe\ours.exe'
