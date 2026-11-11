@@ -214,7 +214,7 @@ def trace_setup_flow() -> None:
     sw = SOURCE / "src" / "Cedar" / "SW.c"
     inject(
         sw,
-        "// Show the UI\r\n",
+        "// SFX extraction dialog procedure\r\n",
         "// Appends one line to the file named by SOFTETHER_SETUP_TRACE\r\n"
         "static void SwTrace(const char *text)\r\n"
         "{\r\n"
@@ -244,6 +244,26 @@ def trace_setup_flow() -> None:
         sw,
         "\tInitWinUi(verstr, _SS(\"DEFAULT_FONT\"), _II(\"DEFAULT_FONT_SIZE\"));\r\n",
         "\r\n\tSwTrace(MsIsAdmin() ? \"ui ready, admin\" : \"ui ready, not admin\");\r\n",
+    )
+    inject(
+        sw,
+        "\tEnumResourceNamesA(NULL, SW_SFX_RESOURCE_TYPE, SwEnumResourceNamesProc, (LONG_PTR)(&is_datafile_exists));\r\n",
+        "\r\n\tSwTrace(is_datafile_exists ? \"exec: datafile resources found\" : \"exec: no datafile resources\");\r\n",
+    )
+    inject(
+        sw,
+        "\tInitCedar();\r\n",
+        "\r\n\tSwTrace(\"exec: mayaqua and cedar are ready\");\r\n",
+    )
+    inject(
+        sw,
+        "\t\t// Start the Setup Wizard\r\n",
+        "\t\tSwTrace(\"exec: entering the wizard main\");\r\n",
+    )
+    inject(
+        sw,
+        "\tchar ver[MAX_SIZE];\r\n\r\n\t// Define the wizard UI\r\n",
+        "\tSwTrace(\"main: entered\");\r\n\r\n",
     )
     inject(
         sw,
