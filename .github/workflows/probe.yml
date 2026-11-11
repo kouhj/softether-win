@@ -13,19 +13,24 @@ jobs:
           New-Item -ItemType Directory -Force probe | Out-Null
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
 
-      - name: Decompress the resources with real zlib
+      - name: Swap the payloads
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
           using System;
           using System.IO;
+          using System.Collections.Generic;
           using System.Runtime.InteropServices;
 
           public class Res
           {
               [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
               static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+              [DllImport("kernel32.dll")]
+              static extern bool FreeLibrary(IntPtr module);
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern IntPtr FindResourceA(IntPtr module, string name, string type);
               [DllImport("kernel32.dll", SetLastError = true)]
@@ -34,44 +39,83 @@ jobs:
               static extern IntPtr LockResource(IntPtr data);
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern uint SizeofResource(IntPtr module, IntPtr res);
-              public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+              public static extern IntPtr BeginUpdateResourceW(string file, bool delete);
               [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern bool EnumResourceNamesA(IntPtr module, string type, Proc p, IntPtr l);
+              public static extern bool UpdateResourceA(IntPtr update, string type, string name, ushort lang, byte[] data, uint size);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              public static extern bool EndUpdateResourceW(IntPtr update, bool discard);
 
-              public static System.Collections.Generic.List<string> Names(string path)
+              public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
+
+              public static List<string> Names(string path, string type)
               {
-                  var list = new System.Collections.Generic.List<string>();
+                  var list = new List<string>();
                   IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
-                  if (h == IntPtr.Zero) throw new Exception("load failed " + Marshal.GetLastWin32Error());
-                  EnumResourceNamesA(h, "DATAFILE", (m, t, n, l) => { list.Add(Marshal.PtrToStringAnsi(n)); return true; }, IntPtr.Zero);
+                  if (h == IntPtr.Zero) throw new Exception("load failed " + path);
+                  EnumResourceNamesH(h, type, (m, t, n, l) => { list.Add(Marshal.PtrToStringAnsi(n)); return true; }, IntPtr.Zero);
+                  FreeLibrary(h);
                   return list;
               }
 
-              public static void Dump(string path, string name, string dst)
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool EnumResourceNamesH(IntPtr module, string type, Proc p, IntPtr l);
+
+              public static int Count(string path, string type) { return Names(path, type).Count; }
+
+              public static byte[] Data(string path, string type, string name)
               {
                   IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
-                  IntPtr r = FindResourceA(h, name, "DATAFILE");
+                  IntPtr r = FindResourceA(h, name, type);
                   if (r == IntPtr.Zero) throw new Exception("no resource " + name);
                   uint size = SizeofResource(h, r);
-                  IntPtr data = LockResource(LoadResource(h, r));
                   byte[] buf = new byte[size];
-                  Marshal.Copy(data, buf, 0, (int)size);
-                  File.WriteAllBytes(dst, buf);
+                  Marshal.Copy(LockResource(LoadResource(h, r)), buf, 0, (int)size);
+                  FreeLibrary(h);
+                  return buf;
+              }
+
+              public static void Copy(string from, string to, string[] names, bool deleteFirst)
+              {
+                  IntPtr u = BeginUpdateResourceW(to, false);
+                  if (u == IntPtr.Zero) throw new Exception("begin update failed " + Marshal.GetLastWin32Error());
+                  bool discard = true;
+                  try
+                  {
+                      if (deleteFirst)
+                          foreach (string n in names)
+                              if (!UpdateResourceA(u, "DATAFILE", n, 0, null, 0)) throw new Exception("delete failed " + n);
+                      foreach (string n in names)
+                      {
+                          byte[] data = Data(from, "DATAFILE", n);
+                          if (!UpdateResourceA(u, "DATAFILE", n, 0, data, (uint)data.Length)) throw new Exception("update failed " + n);
+                      }
+                      discard = false;
+                  }
+                  finally
+                  {
+                      if (!EndUpdateResourceW(u, discard)) throw new Exception("end update failed");
+                  }
               }
           }
           '@
-          New-Item -ItemType Directory -Force probe\res | Out-Null
-          foreach ($n in [Res]::Names((Resolve-Path 'probe\ours.exe'))) {
-            $f = "probe\res\$n"
-            [Res]::Dump((Resolve-Path 'probe\ours.exe'), $n, $f)
-            $raw = [System.IO.File]::ReadAllBytes($f)
-            $declared = [BitConverter]::ToUInt32($raw, 0)
-            "resource $n size=$($raw.Length) declared=$declared"
-            python3 -c "import sys,zlib,struct;d=open(sys.argv[1],'rb').read();n=struct.unpack('<I',d[:4])[0];out=zlib.decompress(d[4:]);print('  zlib ok declared=%d actual=%d' % (n,len(out)))" $f
-            if ($LASTEXITCODE -ne 0) { "  zlib FAILED" }
+          foreach ($pair in @(@('probe\official.exe', 'official'), @('probe\ours.exe', 'ours'))) {
+            $path = $pair[0]; $label = $pair[1]
+            $line = "$label"
+            foreach ($t in @(3, 14, 5, 16, 24, 10)) {
+              $line += " type$t=$([Res]::Count((Resolve-Path $path), $t.ToString()))"
+            }
+            $line
+            $names = [Res]::Names((Resolve-Path $path), 'DATAFILE')
+            "  datafile: $($names -join ',')"
           }
+          Copy-Item 'probe\official.exe' 'probe\official+ours-payload.exe'
+          [Res]::Copy((Resolve-Path 'probe\ours.exe'), (Resolve-Path 'probe\official+ours-payload.exe'), [Res]::Names((Resolve-Path 'probe\ours.exe'), 'DATAFILE'))
+          Copy-Item 'probe\ours.exe' 'probe\ours+official-payload.exe'
+          [Res]::Copy((Resolve-Path 'probe\official.exe'), (Resolve-Path 'probe\ours+official-payload.exe'), [Res]::Names((Resolve-Path 'probe\official.exe'), 'DATAFILE'), $true)
+          "built the two hybrids"
 
-      - name: Is the dialog starving its timer
+      - name: Run them
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -86,7 +130,6 @@ jobs:
               [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
               [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
               [DllImport("user32.dll")] public static extern bool GetUpdateRect(IntPtr h, IntPtr rect, bool erase);
-              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
 
               public static IntPtr Find(uint pid, string cls)
               {
@@ -107,11 +150,21 @@ jobs:
               }
           }
           '@
-          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
-          foreach ($i in 1..4) {
-            Start-Sleep -Seconds 2
+          function Run([string]$exe, [string]$label) {
+            "=== $label"
+            $p = Start-Process -FilePath $exe -PassThru
+            Start-Sleep -Seconds 6
             $p.Refresh()
             $dlg = [Win]::Find([uint32]$p.Id, '#32770')
-            "t=$($i*2)s cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s dialog=$($dlg -ne [IntPtr]::Zero) dirty=$([Win]::GetUpdateRect($dlg, [IntPtr]::Zero, $false))"
+            "  cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s dialog=$($dlg -ne [IntPtr]::Zero) dirty=$([Win]::GetUpdateRect($dlg, [IntPtr]::Zero, $false))"
+            Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | ForEach-Object { "  child $($_.ProcessId)" }
+            Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -ErrorAction SilentlyContinue | ForEach-Object {
+              "  temp $($_.Name): " + ((Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Length)" }) -join ' ')
+            }
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+            Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
           }
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Run 'probe\official+ours-payload.exe' 'official binary, our payload'
+          Run 'probe\ours+official-payload.exe' 'our binary, official payload'
