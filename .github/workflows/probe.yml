@@ -44,7 +44,7 @@ jobs:
               public static extern bool UpdateResourceA(IntPtr update, string type, string name, ushort lang, byte[] data, uint size);
               [DllImport("kernel32.dll", SetLastError = true)]
               public static extern bool EndUpdateResourceW(IntPtr update, bool discard);
-              [DllImport("kernel32.dll", SetLastError = true)]
+              [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "EnumResourceNamesA")]
               static extern bool EnumResourceNamesH(IntPtr module, string type, Proc p, IntPtr l);
 
               public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
