@@ -135,8 +135,14 @@ function New-SfxInstaller([string]$baseExe, [string]$destination, [string[]]$fil
             else {
                 $packed = Compress-ZLib $bytes
                 $payload = [byte[]]::new(4 + $packed.Length)
-                # CompressBuf() puts the real size in front of the zlib stream
-                [BitConverter]::GetBytes([uint32]$bytes.Length).CopyTo($payload, 0)
+                # CompressBuf() puts the real size in front of the zlib stream.
+                # The extractor hands that value to zlib's uncompress() as the
+                # output buffer size, and when the buffer is filled exactly
+                # uncompress() gives up before it reads the stream trailer and
+                # returns an error: the installer then writes an empty file.
+                # A small margin avoids that boundary without changing what the
+                # extracted file contains.
+                [BitConverter]::GetBytes([uint32]($bytes.Length + 64)).CopyTo($payload, 0)
                 $packed.CopyTo($payload, 4)
             }
 

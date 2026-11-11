@@ -158,6 +158,56 @@ def fix_blake2_sse2() -> None:
     log("  blake2 source is now a concrete path, HAVE_SSE2 reaches the compiler")
 
 
+def patch_sfx_dialog() -> None:
+    """Extract at once instead of waiting for the first timer tick.
+
+    Windows only synthesises WM_TIMER while the message queue is empty.  The
+    self extracting dialog of our own build repaints without ever settling on
+    a headless build server, so the 500 ms timer never fires and the installer
+    sits in front of its "Preparing to install..." dialog forever.  Posting
+    the timer message ourselves runs the extraction before any paint message
+    is dispatched.
+    """
+    log("patching the self extracting dialog")
+    sw = SOURCE / "src" / "Cedar" / "SW.c"
+    inject(
+        sw,
+        "\tcase WM_INITDIALOG:\r\n\t\tSetTimer(hWnd, 1, 500, NULL);\r\n",
+        "\r\n\t\t// The dialog repaint can starve WM_TIMER, so extract now\r\n"
+        "\t\tPostMessage(hWnd, WM_TIMER, (WPARAM)1, 0);\r\n",
+    )
+    inject(
+        sw,
+        "// SFX extraction dialog procedure\r\n"
+        "bool CALLBACK SfxModeMainDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)\r\n"
+        "{\r\n\tUINT ret;\r\n\tbool hide_msg = false;\r\n",
+        "\tSfxTraceMessage(msg, wParam);\r\n",
+    )
+    inject(
+        sw,
+        "// SFX extraction dialog procedure\r\n",
+        "// Writes the dialog messages to the file named by SOFTETHER_SFX_TRACE\r\n"
+        "static void SfxTraceMessage(UINT msg, WPARAM wParam)\r\n"
+        "{\r\n"
+        "\twchar_t path[MAX_PATH];\r\n"
+        "\tHANDLE h;\r\n"
+        "\tchar line[64];\r\n"
+        "\tint len;\r\n"
+        "\r\n"
+        "\tif (GetEnvironmentVariableW(L\"SOFTETHER_SFX_TRACE\", path, MAX_PATH) == 0)\r\n"
+        "\t{\r\n\t\treturn;\r\n\t}\r\n"
+        "\r\n"
+        "\th = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,\r\n"
+        "\t\tOPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);\r\n"
+        "\tif (h == INVALID_HANDLE_VALUE)\r\n\t{\r\n\t\treturn;\r\n\t}\r\n"
+        "\tlen = sprintf_s(line, sizeof(line), \"%u %u\\r\\n\", (UINT)msg, (UINT)wParam);\r\n"
+        "\tif (len > 0)\r\n\t{\r\n\t\tWriteFile(h, line, (DWORD)len, NULL, NULL);\r\n\t}\r\n"
+        "\tCloseHandle(h);\r\n"
+        "}\r\n"
+        "\r\n",
+    )
+
+
 def install_feature() -> None:
     log("installing the netrule feature")
     for name in ("netrule.c", "netrule.h"):
@@ -210,6 +260,8 @@ def install_feature() -> None:
 
 def main() -> None:
     fetch()
+
+    patch_sfx_dialog()
 
     patches = sorted((ROOT / "patches").glob("*.patch"))
     prepared = (SOURCE / "src" / "Cedar" / "netrule.c").is_file()
