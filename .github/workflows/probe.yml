@@ -66,15 +66,9 @@ jobs:
           $m = [Res]::LoadLibraryExW((Resolve-Path 'probe\ours.exe'), [IntPtr]::Zero, 2)
           "module=$m"
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          $job = Start-Job -ScriptBlock { param($m) [Res]::Names('x', [IntPtr]$m) } -ArgumentList $m
-          if (Wait-Job $job -Timeout 30) {
-            $names = Receive-Job $job
-            "enumeration: $($names.Count) entries in $([math]::Round($sw.Elapsed.TotalSeconds,2))s"
-            $names | ForEach-Object { "  $_" }
-          } else {
-            "enumeration still running after 30s: the resource directory loops"
-            Stop-Job $job
-          }
+          $names = [Res]::Names('probe\ours.exe', $m)
+          "enumeration: $($names.Count) entries in $([math]::Round($sw.Elapsed.TotalSeconds,2))s"
+          $names | ForEach-Object { "  $_" }
           [Res]::FreeLibrary($m) | Out-Null
 
       - name: Run it and watch what it writes
