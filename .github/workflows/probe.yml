@@ -7,98 +7,110 @@ jobs:
   probe:
     runs-on: windows-latest
     steps:
-      - name: Fetch both installers
+      - name: Fetch the installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force probe | Out-Null
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' `
             -OutFile 'probe\ours.exe'
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' `
-            -OutFile 'probe\official.exe'
           Get-ChildItem probe | ForEach-Object { "{0} {1}" -f $_.Name, $_.Length }
 
-      - name: Run them and look
+      - name: Enumerate the resource table of the file
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
           using System;
-          using System.Text;
           using System.Collections.Generic;
           using System.Runtime.InteropServices;
 
-          public class WinEnum
+          public class Res
           {
-              delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
-              [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
-              [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr l);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-              [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+              public delegate bool EnumProc(IntPtr hModule, IntPtr type, IntPtr name, IntPtr lParam);
 
-              static string Text(IntPtr h)
-              {
-                  StringBuilder sb = new StringBuilder(2048);
-                  GetWindowTextW(h, sb, sb.Capacity);
-                  return sb.ToString();
-              }
+              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              public static extern IntPtr LoadLibraryExW(string file, IntPtr h, int flags);
 
-              static string Cls(IntPtr h)
-              {
-                  StringBuilder sb = new StringBuilder(256);
-                  GetClassNameW(h, sb, sb.Capacity);
-                  return sb.ToString();
-              }
+              [DllImport("kernel32.dll", SetLastError = true)]
+              public static extern bool FreeLibrary(IntPtr h);
 
-              public static List<string> Dump(uint pid)
+              [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+              public static extern bool EnumResourceNamesA(IntPtr hModule, string type, EnumProc proc, IntPtr lParam);
+
+              [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+              static extern IntPtr FindResourceA(IntPtr hModule, IntPtr name, string type);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern uint SizeofResource(IntPtr hModule, IntPtr hr);
+
+              public static List<string> Names(string file, IntPtr hModule)
               {
                   List<string> list = new List<string>();
-                  EnumWindows((h, l) =>
+                  EnumResourceNamesA(hModule, "DATAFILE", (m, t, n, l) =>
                   {
-                      uint wpid;
-                      GetWindowThreadProcessId(h, out wpid);
-                      if (wpid != pid) return true;
-                      string line = "top \"" + Text(h) + "\" class=" + Cls(h) + " visible=" + IsWindowVisible(h);
-                      EnumChildWindows(h, (c, l2) =>
+                      if (((long)n >> 16) == 0)
                       {
-                          line += " | child \"" + Text(c) + "\" class=" + Cls(c);
+                          list.Add("id " + n.ToInt64());
                           return true;
-                      }, IntPtr.Zero);
-                      list.Add(line);
+                      }
+                      string name = Marshal.PtrToStringAnsi(n);
+                      IntPtr hr = FindResourceA(m, n, "DATAFILE");
+                      uint size = hr == IntPtr.Zero ? 0 : SizeofResource(m, hr);
+                      list.Add(name + " " + size);
                       return true;
                   }, IntPtr.Zero);
                   return list;
               }
           }
           '@
-
-          function Run-Probe([string]$exe, [string]$label) {
-            "=== $label"
-            Get-ChildItem $env:TEMP -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match 'vpn|hamcore|installer\.cache|setup' } |
-              Remove-Item -Force -ErrorAction SilentlyContinue
-            $p = Start-Process -FilePath $exe -PassThru
-            for ($i = 0; $i -lt 8; $i++) {
-              Start-Sleep -Seconds 5
-              $p.Refresh()
-              if ($p.HasExited) { "  [${i}] exited code=$($p.ExitCode)"; break }
-              "  [${i}] cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s threads=$($p.Threads.Count) ws=$([math]::Round($p.WorkingSet64/1MB,1))MB"
-            }
-            "  windows:"
-            [WinEnum]::Dump([uint32]$p.Id) | ForEach-Object { "    $_" }
-            "  temp files:"
-            Get-ChildItem $env:TEMP -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match 'vpn|hamcore|installer\.cache|setup' } |
-              ForEach-Object { "    {0} {1}" -f $_.Name, $_.Length }
-            "  children:"
-            Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" |
-              ForEach-Object { "    $($_.ProcessId) $($_.Name) $($_.CommandLine)" }
-            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-            Start-Sleep -Seconds 2
-            Get-Process -Name vpnsetup,vpnclient,vpncmgr,vpnserver -ErrorAction SilentlyContinue | Stop-Process -Force
+          $m = [Res]::LoadLibraryExW((Resolve-Path 'probe\ours.exe'), [IntPtr]::Zero, 2)
+          "module=$m"
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $job = Start-Job -ScriptBlock { param($m) [Res]::Names('x', [IntPtr]$m) } -ArgumentList $m
+          if (Wait-Job $job -Timeout 30) {
+            $names = Receive-Job $job
+            "enumeration: $($names.Count) entries in $([math]::Round($sw.Elapsed.TotalSeconds,2))s"
+            $names | ForEach-Object { "  $_" }
+          } else {
+            "enumeration still running after 30s: the resource directory loops"
+            Stop-Job $job
           }
+          [Res]::FreeLibrary($m) | Out-Null
 
-          Run-Probe 'probe\official.exe' 'official 5.02.5187'
-          Run-Probe 'probe\ours.exe' 'ours 5.02.5189'
+      - name: Run it and watch what it writes
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public class Io
+          {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct IO_COUNTERS
+              {
+                  public ulong ReadOperationCount;
+                  public ulong WriteOperationCount;
+                  public ulong OtherOperationCount;
+                  public ulong ReadTransferCount;
+                  public ulong WriteTransferCount;
+                  public ulong OtherTransferCount;
+              }
+              [DllImport("kernel32.dll", SetLastError = true)]
+              public static extern bool GetProcessIoCounters(IntPtr h, out IO_COUNTERS c);
+          }
+          '@
+          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
+          for ($i = 0; $i -lt 5; $i++) {
+            Start-Sleep -Seconds 5
+            $p.Refresh()
+            if ($p.HasExited) { "  [${i}] exited code=$($p.ExitCode)"; break }
+            $c = New-Object Io+IO_COUNTERS
+            [Io]::GetProcessIoCounters($p.Handle, [ref]$c) | Out-Null
+            "  [${i}] cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s threads=$($p.Threads.Count) writes=$($c.WriteOperationCount) written=$($c.WriteTransferCount) reads=$($c.ReadOperationCount) read=$($c.ReadTransferCount)"
+            Get-ChildItem $env:TEMP -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'VPN_|hamcore|vpnsetup' } |
+              Select-Object -First 12 |
+              ForEach-Object { "      {0} {1}" -f $_.FullName, $_.Length }
+          }
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          Get-Process -Name vpnsetup,vpnclient,vpncmgr -ErrorAction SilentlyContinue | Stop-Process -Force
