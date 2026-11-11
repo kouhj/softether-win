@@ -15,89 +15,7 @@ jobs:
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
-      - name: Build the variants
-        shell: pwsh
-        run: |
-          Add-Type -TypeDefinition @'
-          using System;
-          using System.IO;
-          using System.Collections.Generic;
-          using System.Runtime.InteropServices;
-
-          public class Res
-          {
-              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-              static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
-              [DllImport("kernel32.dll")]
-              static extern bool FreeLibrary(IntPtr module);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern IntPtr FindResourceA(IntPtr module, IntPtr name, IntPtr type);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern IntPtr LoadResource(IntPtr module, IntPtr res);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern IntPtr LockResource(IntPtr data);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern uint SizeofResource(IntPtr module, IntPtr res);
-              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-              static extern IntPtr BeginUpdateResourceW(string file, bool delete);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern bool UpdateResourceA(IntPtr update, string type, string name, ushort lang, byte[] data, uint size);
-              [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "UpdateResourceA")]
-              static extern bool UpdateResourceI(IntPtr update, IntPtr type, IntPtr name, ushort lang, byte[] data, uint size);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern bool EndUpdateResourceW(IntPtr update, bool discard);
-              [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "EnumResourceNamesA")]
-              static extern bool EnumResourceNamesH(IntPtr module, string type, Proc p, IntPtr l);
-
-              public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
-
-              public static List<string> Names(string path, string type)
-              {
-                  var list = new List<string>();
-                  IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
-                  EnumResourceNamesH(h, type, (m, t, n, l) => { list.Add(Marshal.PtrToStringAnsi(n)); return true; }, IntPtr.Zero);
-                  FreeLibrary(h);
-                  return list;
-              }
-
-              public static byte[] ById(string path, int id, int type)
-              {
-                  IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
-                  IntPtr r = FindResourceA(h, (IntPtr)id, (IntPtr)type);
-                  if (r == IntPtr.Zero) { FreeLibrary(h); return null; }
-                  uint size = SizeofResource(h, r);
-                  byte[] buf = new byte[size];
-                  Marshal.Copy(LockResource(LoadResource(h, r)), buf, 0, (int)size);
-                  FreeLibrary(h);
-                  return buf;
-              }
-
-              public static void SetBlob(string file, int id, int type, byte[] data)
-              {
-                  IntPtr u = BeginUpdateResourceW(file, false);
-                  if (!UpdateResourceI(u, (IntPtr)type, (IntPtr)id, 0, data, (uint)data.Length)) throw new Exception("update failed");
-                  if (!EndUpdateResourceW(u, false)) throw new Exception("end update failed");
-              }
-
-              public static void DeleteDatafile(string file, string name)
-              {
-                  IntPtr u = BeginUpdateResourceW(file, false);
-                  if (!UpdateResourceA(u, "DATAFILE", name, 0, null, 0)) throw new Exception("delete failed " + name);
-                  if (!EndUpdateResourceW(u, false)) throw new Exception("end update failed");
-              }
-          }
-          '@
-          $ours = (Resolve-Path 'probe\ours.exe').Path
-          $official = (Resolve-Path 'probe\official.exe').Path
-          Copy-Item $ours 'probe\v2-official-manifest.exe'
-          [Res]::SetBlob((Resolve-Path 'probe\v2-official-manifest.exe').Path, 1, 24, [Res]::ById($official, 1, 24))
-          Copy-Item $ours 'probe\v3-no-datafile.exe'
-          foreach ($n in [Res]::Names($ours, 'DATAFILE')) { [Res]::DeleteDatafile((Resolve-Path 'probe\v3-no-datafile.exe').Path, $n) }
-          "ours datafile entries: $(([Res]::Names($ours, 'DATAFILE')) -join ',')"
-          "v3 datafile entries: $(([Res]::Names((Resolve-Path 'probe\v3-no-datafile.exe'), 'DATAFILE')) -join ',')"
-          "v2 manifest: $(([Res]::ById((Resolve-Path 'probe\v2-official-manifest.exe'), 1, 24)).Length) bytes"
-
-      - name: Run them
+      - name: Poke our own dialog
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -111,10 +29,11 @@ jobs:
               [DllImport("user32.dll")] public static extern bool EnumWindows(Proc p, IntPtr l);
               [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
               [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+              [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 
-              public static bool HasDialog(uint pid)
+              public static IntPtr Find(uint pid, string cls)
               {
-                  bool found = false;
+                  IntPtr found = IntPtr.Zero;
                   EnumWindows((h, l) =>
                   {
                       uint p;
@@ -123,7 +42,7 @@ jobs:
                       {
                           var c = new StringBuilder(256);
                           GetClassNameW(h, c, 256);
-                          if (c.ToString() == "#32770") { found = true; return false; }
+                          if (c.ToString() == cls) { found = h; return false; }
                       }
                       return true;
                   }, IntPtr.Zero);
@@ -131,24 +50,75 @@ jobs:
               }
           }
           '@
-          function Run([string]$exe) {
-            $p = Start-Process -FilePath $exe -PassThru
-            $trace = @()
-            for ($i = 0; $i -lt 5; $i++) {
-              Start-Sleep -Seconds 1
-              $p.Refresh()
-              $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-              $files = if ($dir) { (Get-ChildItem $dir.FullName -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ' } else { '-' }
-              $kids = (Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | Measure-Object).Count
-              $trace += "t=$($i+1) cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2)) kids=$kids dlg=$([Win]::HasDialog([uint32]$p.Id)) files=$files"
-            }
-            if ($p.HasExited -eq $false) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-            Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
-            Start-Sleep -Seconds 2
-            Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
-            "=== $([IO.Path]::GetFileName($exe))"
-            $trace
+          function Dump([uint32]$pid) {
+            $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dir) { (Get-ChildItem $dir.FullName -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ' } else { '-' }
           }
-          Run 'probe\v2-official-manifest.exe'
-          Run 'probe\v3-no-datafile.exe'
-          Run 'probe\official.exe'
+          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
+          Start-Sleep -Seconds 3
+          $p.Refresh()
+          $dlg = [Win]::Find([uint32]$p.Id, '#32770')
+          "before poke: cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2)) dlg=$($dlg -ne [IntPtr]::Zero) files=$(Dump $p.Id)"
+          [Win]::PostMessage($dlg, 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
+          for ($i = 0; $i -lt 8; $i++) {
+            Start-Sleep -Seconds 1
+            $p.Refresh()
+            $kids = (Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | Measure-Object).Count
+            $childDlg = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)") | ForEach-Object { [Win]::Find([uint32]$_.ProcessId, '#32770') -ne [IntPtr]::Zero }
+            "t=$($i+1) cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2)) kids=$kids kidDlg=$childDlg exited=$($p.HasExited) files=$(Dump $p.Id)"
+          }
+          Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | ForEach-Object {
+            $c = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+            "child $($_.Name) cpu=$([math]::Round($c.TotalProcessorTime.TotalSeconds,2))"
+          }
+          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Resolve the win32u offsets
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+
+          public class Exp
+          {
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+              static extern IntPtr LoadLibraryW(string path);
+              [DllImport("kernel32.dll")]
+              static extern IntPtr GetProcAddress(IntPtr module, string name);
+              [DllImport("psapi.dll", CharSet = CharSet.Unicode)]
+              static extern uint GetModuleFileNameEx(IntPtr process, IntPtr module, StringBuilder name, uint size);
+              [DllImport("kernel32.dll")]
+              static extern IntPtr GetModuleHandleW(string name);
+
+              public static void Nearest(string dll, long[] offsets)
+              {
+                  IntPtr h = LoadLibraryW(dll);
+                  var names = new List<string>();
+                  IntPtr p = GetProcAddress(h, "NtUserGetMessage");
+                  foreach (long off in offsets)
+                  {
+                      long best = -1;
+                      string bestName = null;
+                      foreach (string n in new[] { "NtUserPeekMessage", "NtUserGetMessage", "NtUserMessageCall", "NtUserDispatchMessage", "NtUserCallOneParam", "NtUserCallTwoParam", "NtUserSetTimer", "NtUserGetDC", "NtUserBeginPaint", "NtUserEndPaint", "NtUserInvalidateRect", "NtUserRedrawWindow", "NtUserSetWindowPos", "NtUserGetUpdateRect", "NtUserInternalGetWindowText" })
+                      {
+                          IntPtr a = GetProcAddress(h, n);
+                          long rel = a.ToInt64() - h.ToInt64();
+                          if (rel <= off && rel > best) { best = rel; bestName = n; }
+                      }
+                      "  win32u+0x{0:x} is after {1}+0x{2:x} (delta 0x{3:x})" -f off, bestName, best, off - best
+                  }
+              }
+          }
+          '@
+          [Exp]::Nearest('win32u.dll', @(0x18c4, 0x12c4))
+
+      - name: Run official for the control
+        shell: pwsh
+        run: |
+          Start-Process -FilePath 'probe\official.exe' | Out-Null
+          Start-Sleep -Seconds 2
+          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | ForEach-Object { "child cpu=$([math]::Round($_.TotalProcessorTime.TotalSeconds,2)) windows=$($_.MainWindowTitle)" }
+          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
