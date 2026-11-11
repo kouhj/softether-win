@@ -7,7 +7,7 @@ jobs:
   probe:
     runs-on: windows-latest
     steps:
-      - name: Fetch the installers from the newest build
+      - name: Fetch the newest installers
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -16,75 +16,19 @@ jobs:
           echo "using the installers of $run"
           gh run download "$run" -R "$GITHUB_REPOSITORY" -n softether-installers-5.2.5189 -D new
           ls -l new
-          gh release download 5.2.5189 -R softethervpn/softethervpn -p 'softether-vpnclient-5.02.5187.x64.exe' -D probe --clobber
-          mv probe/softether-vpnclient-5.02.5187.x64.exe probe/official.exe
-          ls -l probe
-      - name: Cross check the two setup programs
+      - name: Trace the setup flow
         shell: pwsh
         run: |
-          Add-Type -TypeDefinition @'
-          using System;
-          using System.Text;
-          using System.Collections.Generic;
-          using System.Runtime.InteropServices;
-
-          public class Win
-          {
-              public delegate bool Proc(IntPtr h, IntPtr l);
-              [DllImport("user32.dll")] public static extern bool EnumWindows(Proc p, IntPtr l);
-              [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-
-              public static string Dump(uint pid)
-              {
-                  var list = new List<string>();
-                  EnumWindows((h, l) =>
-                  {
-                      uint p;
-                      GetWindowThreadProcessId(h, out p);
-                      if (p == pid)
-                      {
-                          var c = new StringBuilder(256);
-                          var t = new StringBuilder(256);
-                          GetClassNameW(h, c, 256);
-                          GetWindowTextW(h, t, 256);
-                          list.Add(c.ToString() + " | " + t.ToString() + " | visible=" + IsWindowVisible(h));
-                      }
-                      return true;
-                  }, IntPtr.Zero);
-                  return list.Count == 0 ? "no window" : string.Join(" ;; ", list);
-              }
-          }
-          '@
-          function Extract([string]$exe) {
-            Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
-            $p = Start-Process -FilePath $exe -PassThru
-            Start-Sleep -Seconds 4
-            Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            $d = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            return $d.FullName
-          }
-          function Try-Setup([string]$setup, [string]$dir, [string]$label) {
-            $p = Start-Process -FilePath $setup -ArgumentList "/CALLERSFXPATH:`"$(Join-Path $dir 'installer.cache')`"", '/ISEASYINSTALLER:0' -WorkingDirectory $dir -PassThru
-            for ($i = 0; $i -lt 3; $i++) {
-              Start-Sleep -Seconds 1
-              $p.Refresh()
-              "$label t=$($i+1)s cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2)) exited=$($p.HasExited) -> $([Win]::Dump([uint32]$p.Id))"
-            }
-            $grand = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | Select-Object -First 1
-            if ($grand) { "$label grandchild: $($grand.Name) $($grand.ProcessId)" }
-            Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-          }
-          $official_dir = Extract (Resolve-Path 'probe\official.exe').Path
-          "official dir: " + ((Get-ChildItem $official_dir -File | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ')
-          $ours_dir = Extract (Get-ChildItem 'new' -Filter 'softether-vpnclient-*.exe' | Select-Object -First 1).FullName
-          "our dir: " + ((Get-ChildItem $ours_dir -File | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ')
-          Try-Setup (Join-Path $official_dir 'vpnsetup.exe') $official_dir 'official-in-official'
-          Try-Setup (Join-Path $official_dir 'vpnsetup.exe') $ours_dir 'official-in-ours'
-          Try-Setup (Join-Path $ours_dir 'vpnsetup.exe') $official_dir 'ours-in-official'
-          Try-Setup (Join-Path $ours_dir 'vpnsetup.exe') $ours_dir 'ours-in-ours'
+          $env:SOFTETHER_SETUP_TRACE = 'C:\trace.txt'
+          $exe = (Get-ChildItem new\softether-vpnclient-*.exe | Select-Object -First 1).FullName
+          "installer: $exe"
+          Remove-Item $env:SOFTETHER_SETUP_TRACE -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 10
+          'trace:'
+          if (Test-Path $env:SOFTETHER_SETUP_TRACE) { Get-Content $env:SOFTETHER_SETUP_TRACE } else { 'no trace' }
+          Get-CimInstance Win32_Process -Filter "Name='vpnsetup.exe' OR Name='vpncmgr.exe' OR Name='vpncmd.exe' OR Name='vpnclient.exe'" | ForEach-Object { "proc $($_.ProcessId) $($_.Name): $($_.CommandLine)" }
+          Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory | ForEach-Object { "dir $($_.Name): " + ((Get-ChildItem $_.FullName | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ') }
+          Get-Process -Name vpnsetup,vpncmgr,vpnclient,vpncmd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
