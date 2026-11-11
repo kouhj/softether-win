@@ -7,16 +7,20 @@ jobs:
   probe:
     runs-on: windows-latest
     steps:
-      - name: Fetch the installer
+      - name: Fetch the installer and the archive
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force probe | Out-Null
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' `
             -OutFile 'probe\ours.exe'
-          Get-ChildItem probe | ForEach-Object { "{0} {1}" -f $_.Name, $_.Length }
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-win-5.2.5189-x64.zip' `
+            -OutFile 'probe\win.zip'
+          Expand-Archive 'probe\win.zip' -DestinationPath 'probe\zip' -Force
+          Get-ChildItem 'probe\zip' -Recurse -File | ForEach-Object { "{0} {1}" -f $_.Name, $_.Length }
 
-      - name: Enumerate the resource table of the file
+      - name: Where does the thread spin
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -24,87 +28,82 @@ jobs:
           using System.Collections.Generic;
           using System.Runtime.InteropServices;
 
-          public class Res
-          {
-              public delegate bool EnumProc(IntPtr hModule, IntPtr type, IntPtr name, IntPtr lParam);
-
-              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-              public static extern IntPtr LoadLibraryExW(string file, IntPtr h, int flags);
-
-              [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern bool FreeLibrary(IntPtr h);
-
-              [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-              public static extern bool EnumResourceNamesA(IntPtr hModule, string type, EnumProc proc, IntPtr lParam);
-
-              [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-              static extern IntPtr FindResourceA(IntPtr hModule, IntPtr name, string type);
-
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern uint SizeofResource(IntPtr hModule, IntPtr hr);
-
-              public static List<string> Names(string file, IntPtr hModule)
-              {
-                  List<string> list = new List<string>();
-                  EnumResourceNamesA(hModule, "DATAFILE", (m, t, n, l) =>
-                  {
-                      if (((long)n >> 16) == 0)
-                      {
-                          list.Add("id " + n.ToInt64());
-                          return true;
-                      }
-                      string name = Marshal.PtrToStringAnsi(n);
-                      IntPtr hr = FindResourceA(m, n, "DATAFILE");
-                      uint size = hr == IntPtr.Zero ? 0 : SizeofResource(m, hr);
-                      list.Add(name + " " + size);
-                      return true;
-                  }, IntPtr.Zero);
-                  return list;
-              }
-          }
-          '@
-          $m = [Res]::LoadLibraryExW((Resolve-Path 'probe\ours.exe'), [IntPtr]::Zero, 2)
-          "module=$m"
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          $names = [Res]::Names('probe\ours.exe', $m)
-          "enumeration: $($names.Count) entries in $([math]::Round($sw.Elapsed.TotalSeconds,2))s"
-          $names | ForEach-Object { "  $_" }
-          [Res]::FreeLibrary($m) | Out-Null
-
-      - name: Run it and watch what it writes
-        shell: pwsh
-        run: |
-          Add-Type -TypeDefinition @'
-          using System;
-          using System.Runtime.InteropServices;
-          public class Io
+          public class Sampler
           {
               [StructLayout(LayoutKind.Sequential)]
-              public struct IO_COUNTERS
+              public struct CONTEXT
               {
-                  public ulong ReadOperationCount;
-                  public ulong WriteOperationCount;
-                  public ulong OtherOperationCount;
-                  public ulong ReadTransferCount;
-                  public ulong WriteTransferCount;
-                  public ulong OtherTransferCount;
+                  public ulong P1Home, P2Home, P3Home, P4Home, P5Home, P6Home;
+                  public uint ContextFlags;
+                  public uint MxCsr;
+                  public ushort SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
+                  public uint EFlags;
+                  public ulong Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
+                  public ulong Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi;
+                  public ulong R8, R9, R10, R11, R12, R13, R14, R15, Rip;
               }
+
               [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern bool GetProcessIoCounters(IntPtr h, out IO_COUNTERS c);
+              static extern IntPtr OpenThread(uint access, bool inherit, uint tid);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern uint SuspendThread(IntPtr h);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern uint ResumeThread(IntPtr h);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool CloseHandle(IntPtr h);
+
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool GetThreadContext(IntPtr h, ref CONTEXT c);
+
+              public static string Sample(uint tid, ulong moduleBase)
+              {
+                  const uint THREAD_SUSPEND_RESUME = 0x0002;
+                  const uint THREAD_GET_CONTEXT = 0x0008;
+                  const uint THREAD_QUERY_INFORMATION = 0x0040;
+                  const uint CONTEXT_CONTROL = 0x00100001;
+                  IntPtr h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, false, tid);
+                  if (h == IntPtr.Zero) return "open failed " + Marshal.GetLastWin32Error();
+                  try
+                  {
+                      uint prev = SuspendThread(h);
+                      if (prev == 0xFFFFFFFF) return "suspend failed " + Marshal.GetLastWin32Error();
+                      try
+                      {
+                          CONTEXT c = new CONTEXT();
+                          c.ContextFlags = CONTEXT_CONTROL;
+                          if (!GetThreadContext(h, ref c)) return "context failed " + Marshal.GetLastWin32Error();
+                          return string.Format("rip=+0x{0:x} rsp=0x{1:x}", c.Rip - moduleBase, c.Rsp);
+                      }
+                      finally { ResumeThread(h); }
+                  }
+                  finally { CloseHandle(h); }
+              }
           }
           '@
-          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
-          for ($i = 0; $i -lt 5; $i++) {
-            Start-Sleep -Seconds 5
+
+          function Watch([string]$exe, [string]$label) {
+            "=== $label"
+            $p = Start-Process -FilePath $exe -PassThru
+            Start-Sleep -Seconds 8
             $p.Refresh()
-            if ($p.HasExited) { "  [${i}] exited code=$($p.ExitCode)"; break }
-            $c = New-Object Io+IO_COUNTERS
-            [Io]::GetProcessIoCounters($p.Handle, [ref]$c) | Out-Null
-            "  [${i}] cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s threads=$($p.Threads.Count) writes=$($c.WriteOperationCount) written=$($c.WriteTransferCount) reads=$($c.ReadOperationCount) read=$($c.ReadTransferCount)"
+            if ($p.HasExited) { "  exited code=$($p.ExitCode)"; return }
+            $base = [uint64]$p.MainModule.BaseAddress
+            "  base=0x{0:x} cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s" -f $base
+            foreach ($t in $p.Threads) {
+              $s = $null
+              try { $s = [Sampler]::Sample([uint32]$t.Id, $base) } catch { $s = "error $($_.Exception.Message)" }
+              "  thread {0} {1} {2}" -f $t.Id, $t.ThreadState, $s
+            }
             Get-ChildItem $env:TEMP -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'VPN_|hamcore|vpnsetup' } |
-              Select-Object -First 12 |
-              ForEach-Object { "      {0} {1}" -f $_.FullName, $_.Length }
+              Where-Object { $_.FullName -match 'VPN_' } |
+              Select-Object -First 8 | ForEach-Object { "  temp {0} {1}" -f $_.Name, $_.Length }
+            Stop-Process -Id $p.Id -Force
+            Start-Sleep -Seconds 1
+            Get-Process -Name vpnsetup,vpnclient,vpncmgr -ErrorAction SilentlyContinue | Stop-Process -Force
           }
-          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-          Get-Process -Name vpnsetup,vpnclient,vpncmgr -ErrorAction SilentlyContinue | Stop-Process -Force
+
+          Watch 'probe\ours.exe' 'our installer'
+          Watch 'probe\zip\vpnsetup.exe' 'our vpnsetup.exe alone'
