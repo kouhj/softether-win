@@ -90,7 +90,7 @@ jobs:
             Start-Sleep -Seconds 8
             $p.Refresh()
             if ($p.HasExited) { "  exited code=$($p.ExitCode)"; return }
-            $base = [uint64]$p.MainModule.BaseAddress
+            $base = [uint64]$p.MainModule.BaseAddress.ToInt64()
             "  base=0x{0:x} cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s" -f $base
             foreach ($t in $p.Threads) {
               $s = $null
