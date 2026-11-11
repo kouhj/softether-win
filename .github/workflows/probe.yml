@@ -7,7 +7,7 @@ jobs:
   probe:
     runs-on: windows-latest
     steps:
-      - name: Fetch the installer and the archive
+      - name: Fetch
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force probe | Out-Null
@@ -18,57 +18,51 @@ jobs:
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-win-5.2.5189-x64.zip' `
             -OutFile 'probe\win.zip'
           Expand-Archive 'probe\win.zip' -DestinationPath 'probe\zip' -Force
-          Get-ChildItem 'probe\zip' -Recurse -File | ForEach-Object { "{0} {1}" -f $_.Name, $_.Length }
 
-      - name: Where does the thread spin
+      - name: Symbolise the spinning thread
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
           using System;
           using System.Runtime.InteropServices;
 
-          public class Sampler
+          public class Tool
           {
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern IntPtr OpenThread(uint access, bool inherit, uint tid);
-
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern uint SuspendThread(IntPtr h);
-
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern uint ResumeThread(IntPtr h);
-
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern bool CloseHandle(IntPtr h);
-
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern bool GetThreadContext(IntPtr hThread, IntPtr lpContext);
 
-              public static string Sample(uint tid, ulong moduleBase)
+              [DllImport("dbghelp.dll", SetLastError = true)]
+              public static extern uint SymSetOptions(uint options);
+              [DllImport("dbghelp.dll", SetLastError = true)]
+              public static extern bool SymInitialize(IntPtr hProcess, string path, bool invade);
+              [DllImport("dbghelp.dll", SetLastError = true)]
+              public static extern bool SymFromAddr(IntPtr hProcess, ulong address, out ulong disp, IntPtr symbol);
+
+              public static ulong Rip(uint tid)
               {
-                  const uint THREAD_SUSPEND_RESUME = 0x0002;
-                  const uint THREAD_GET_CONTEXT = 0x0008;
-                  const uint THREAD_QUERY_INFORMATION = 0x0040;
-                  const uint CONTEXT_CONTROL = 0x00100001;
-                  IntPtr h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, false, tid);
-                  if (h == IntPtr.Zero) return "open failed " + Marshal.GetLastWin32Error();
+                  IntPtr h = OpenThread(0x0002 | 0x0008 | 0x0040, false, tid);
+                  if (h == IntPtr.Zero) return 0;
                   try
                   {
-                      uint prev = SuspendThread(h);
-                      if (prev == 0xFFFFFFFF) return "suspend failed " + Marshal.GetLastWin32Error();
+                      if (SuspendThread(h) == 0xFFFFFFFF) return 0;
                       try
                       {
                           IntPtr raw = Marshal.AllocHGlobal(0x600);
                           try
                           {
-                              long aligned = (raw.ToInt64() + 15) & ~15L;
-                              IntPtr p = new IntPtr(aligned);
+                              IntPtr p = new IntPtr((raw.ToInt64() + 15) & ~15L);
                               for (int i = 0; i < 0x600; i++) Marshal.WriteByte(p, i, 0);
-                              Marshal.WriteInt32(p, 0x30, unchecked((int)CONTEXT_CONTROL));
-                              if (!GetThreadContext(h, p)) return "context failed " + Marshal.GetLastWin32Error();
-                              long rip = Marshal.ReadInt64(p, 0xF8);
-                              long rsp = Marshal.ReadInt64(p, 0x98);
-                              return string.Format("rip=+0x{0:x} rsp=0x{1:x}", rip - (long)moduleBase, rsp);
+                              Marshal.WriteInt32(p, 0x30, unchecked((int)0x00100001));
+                              if (!GetThreadContext(h, p)) return 0;
+                              return (ulong)Marshal.ReadInt64(p, 0xF8);
                           }
                           finally { Marshal.FreeHGlobal(raw); }
                       }
@@ -76,30 +70,45 @@ jobs:
                   }
                   finally { CloseHandle(h); }
               }
+
+              public static string Symbol(IntPtr process, ulong address)
+              {
+                  IntPtr buf = Marshal.AllocHGlobal(88 + 2048);
+                  try
+                  {
+                      for (int i = 0; i < 88; i++) Marshal.WriteByte(buf, i, 0);
+                      Marshal.WriteInt32(buf, 0, 88);
+                      Marshal.WriteInt32(buf, 80, 2000);
+                      ulong disp;
+                      if (!SymFromAddr(process, address, out disp, buf))
+                          return "no symbol, error " + Marshal.GetLastWin32Error();
+                      string name = Marshal.PtrToStringAnsi(new IntPtr(buf.ToInt64() + 84));
+                      return name + "+0x" + disp.ToString("x");
+                  }
+                  finally { Marshal.FreeHGlobal(buf); }
+              }
           }
           '@
 
-          function Watch([string]$exe, [string]$label) {
-            "=== $label"
-            $p = Start-Process -FilePath $exe -PassThru
-            Start-Sleep -Seconds 8
-            $p.Refresh()
-            if ($p.HasExited) { "  exited code=$($p.ExitCode)"; return }
-            $base = [uint64]$p.MainModule.BaseAddress.ToInt64()
-            "  base=0x{0:x} cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s" -f $base
-            foreach ($t in $p.Threads) {
-              $s = $null
-              try { $s = [Sampler]::Sample([uint32]$t.Id, $base) } catch { $s = "error $($_.Exception.Message)" }
-              "  thread {0} {1} {2}" -f $t.Id, $t.ThreadState, $s
+          [Tool]::SymSetOptions(0x00000002 -bor 0x00000004 -bor 0x00000200) | Out-Null
+          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
+          Start-Sleep -Seconds 8
+          $p.Refresh()
+          "cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s threads=$($p.Threads.Count)"
+          $ok = [Tool]::SymInitialize($p.Handle, 'srv*C:\sym*https://msdl.microsoft.com/download/symbols', $false)
+          "syminitialize=$ok error=$([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+          foreach ($t in $p.Threads) {
+            $rip = [Tool]::Rip([uint32]$t.Id)
+            $mod = $null
+            foreach ($m in $p.Modules) {
+              $b = [uint64]$m.BaseAddress.ToInt64()
+              if ($rip -ge $b -and $rip -lt $b + [uint64]$m.ModuleMemorySize) { $mod = $m; break }
             }
-            Get-ChildItem $env:TEMP -Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match 'VPN_' } |
-              Select-Object -First 8 | ForEach-Object { "  temp {0} {1}" -f $_.Name, $_.Length }
-            Stop-Process -Id $p.Id -Force
-            Start-Sleep -Seconds 1
-            Get-Process -Name vpnsetup,vpnclient,vpncmgr -ErrorAction SilentlyContinue | Stop-Process -Force
+            if ($null -eq $mod) { "  thread $($t.Id) $($t.ThreadState) rip=0x$($rip.ToString('x')) outside" ; continue }
+            $mb = [uint64]$mod.BaseAddress.ToInt64()
+            $sym = ''
+            if ($t.ThreadState -eq 'Running') { $sym = [Tool]::Symbol($p.Handle, $rip) }
+            "  thread {0} {1} {2}+0x{3:x} {4}" -f $t.Id, $t.ThreadState, $mod.ModuleName, ($rip - $mb), $sym
           }
-
-          Watch 'probe\ours.exe' 'our installer'
-          $setup = (Get-ChildItem 'probe\zip' -Recurse -Filter vpnsetup.exe | Select-Object -First 1).FullName
-          Watch $setup 'our vpnsetup.exe alone'
+          Stop-Process -Id $p.Id -Force
+          Get-Process -Name vpnsetup,vpnclient,vpncmgr -ErrorAction SilentlyContinue | Stop-Process -Force
