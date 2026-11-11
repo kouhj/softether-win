@@ -108,6 +108,8 @@ the SoftEther container format, and nothing outside SoftEther unpacks it.
 | `src/Cedar/netrule.c`, `netrule.h` | copied in verbatim |
 | `src/Cedar/CM.c` | includes the header, adds the tray menu entry and its handler, starts/stops the monitor around the message loop, and lets the monitor connect/disconnect without prompting |
 | `src/Cedar/CMakeLists.txt` | links `iphlpapi`, which the gateway lookup needs |
+| `src/Cedar/SW.c` | posts the self-extracting timer message from `WM_INITDIALOG`; the dialog repaint starves `WM_TIMER` on a headless machine, so the extraction would never start |
+| `src/PenCore/CMakeLists.txt`, `src/vpndrvinst/CMakeLists.txt` | an empty generator expression keeps the configuration folder out of the output path, so `PenCore.dll` and `vpndrvinst.exe` land in `src/bin/hamcore` itself |
 
 Every edit is anchored on an exact string and asserted, so an upstream change
 fails the build instead of silently producing a broken tree.
@@ -134,13 +136,17 @@ feature):
 | the vendored `oqs-provider` fails with `error C7757` (empty initializer, every `OQS_ENABLE_SIG_*` family is off) | configure with `-DOQS_ENABLE=OFF`, which selects upstream's `SKIP_OQS_PROVIDER` path |
 | `wlanapi.h` pulls `windot11.h` in and that header does not parse (`NDIS_OBJECT_HEADER` undefined) | the SSID comes from `netsh wlan show interfaces` instead |
 | `BLAKE2` selection uses a generator expression, so `set_property(SOURCE <genex> ... HAVE_SSE2)` never applies and MSVC stops with "This code requires at least SSE2." | the two `set()` calls become a plain `if(HAS_SSE2)` |
+| the Visual Studio generator appends the configuration name to `RUNTIME_OUTPUT_DIRECTORY`, so `PenCore.dll` and `vpndrvinst.exe` were packed as `Release/PenCore.dll`; the wizard loads `PenCore.dll` from the archive root, fails, and never shows itself | `/$<0:>` is appended to the three output directories of both targets, which suppresses the configuration folder |
 
 ## Status
 
 The build is green: the workflow compiles the release, links every tool and
 checks that both halves of the feature are in `vpncmgr.exe` (the tray entry, the
 editor class and the `netsh` probe); the step fails instead of shipping half of
-it. The artifact `softether-win-<version>` contains `vpncmgr.exe`,
+it. Both installers are built from that same output and the setup wizard was
+seen to start on a Windows runner (the window titled *SoftEther VPN Developer
+Edition Setup Wizard* appears within two seconds); a real installation on a
+desktop is still the open smoke test. The artifact `softether-win-<version>` contains `vpncmgr.exe`,
 `vpnclient.exe`, `vpnserver.exe`, `vpnbridge.exe`, `vpncmd.exe`, `vpnsetup.exe`,
 `vpnsmgr.exe` and `hamcore.se2`.
 

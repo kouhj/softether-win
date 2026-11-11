@@ -169,42 +169,11 @@ def patch_sfx_dialog() -> None:
     is dispatched.
     """
     log("patching the self extracting dialog")
-    sw = SOURCE / "src" / "Cedar" / "SW.c"
     inject(
-        sw,
+        SOURCE / "src" / "Cedar" / "SW.c",
         "\tcase WM_INITDIALOG:\r\n\t\tSetTimer(hWnd, 1, 500, NULL);\r\n",
         "\r\n\t\t// The dialog repaint can starve WM_TIMER, so extract now\r\n"
         "\t\tPostMessage(hWnd, WM_TIMER, (WPARAM)1, 0);\r\n",
-    )
-    inject(
-        sw,
-        "// SFX extraction dialog procedure\r\n"
-        "bool CALLBACK SfxModeMainDialogProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)\r\n"
-        "{\r\n\tUINT ret;\r\n\tbool hide_msg = false;\r\n",
-        "\tSfxTraceMessage(msg, wParam);\r\n",
-    )
-    inject(
-        sw,
-        "// SFX extraction dialog procedure\r\n",
-        "// Writes the dialog messages to the file named by SOFTETHER_SFX_TRACE\r\n"
-        "static void SfxTraceMessage(UINT msg, WPARAM wParam)\r\n"
-        "{\r\n"
-        "\twchar_t path[MAX_PATH];\r\n"
-        "\tHANDLE h;\r\n"
-        "\tchar line[64];\r\n"
-        "\tint len;\r\n"
-        "\r\n"
-        "\tif (GetEnvironmentVariableW(L\"SOFTETHER_SFX_TRACE\", path, MAX_PATH) == 0)\r\n"
-        "\t{\r\n\t\treturn;\r\n\t}\r\n"
-        "\r\n"
-        "\th = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,\r\n"
-        "\t\tOPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);\r\n"
-        "\tif (h == INVALID_HANDLE_VALUE)\r\n\t{\r\n\t\treturn;\r\n\t}\r\n"
-        "\tlen = sprintf_s(line, sizeof(line), \"%u %u\\r\\n\", (UINT)msg, (UINT)wParam);\r\n"
-        "\tif (len > 0)\r\n\t{\r\n\t\tWriteFile(h, line, (DWORD)len, NULL, NULL);\r\n\t}\r\n"
-        "\tCloseHandle(h);\r\n"
-        "}\r\n"
-        "\r\n",
     )
 
 
@@ -231,93 +200,6 @@ def fix_hamcore_outputs() -> None:
         with open(cmake, "w", encoding="utf-8", newline="") as stream:
             stream.write(text)
         log(f"  {name} writes into src/bin/hamcore without a configuration folder")
-
-
-def trace_setup_flow() -> None:
-    """Write the setup wizard milestones to the file named by SOFTETHER_SETUP_TRACE."""
-    log("instrumenting the setup flow")
-    sw = SOURCE / "src" / "Cedar" / "SW.c"
-    inject(
-        sw,
-        "// SFX extraction dialog procedure\r\n",
-        "// Appends one line to the file named by SOFTETHER_SETUP_TRACE\r\n"
-        "static void SwTrace(const char *text)\r\n"
-        "{\r\n"
-        "\twchar_t path[MAX_PATH];\r\n"
-        "\tHANDLE h;\r\n"
-        "\tchar line[1024];\r\n"
-        "\tint len;\r\n"
-        "\r\n"
-        "\tif (GetEnvironmentVariableW(L\"SOFTETHER_SETUP_TRACE\", path, MAX_PATH) == 0)\r\n"
-        "\t{\r\n\t\treturn;\r\n\t}\r\n"
-        "\r\n"
-        "\th = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,\r\n"
-        "\t\tOPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);\r\n"
-        "\tif (h == INVALID_HANDLE_VALUE)\r\n\t{\r\n\t\treturn;\r\n\t}\r\n"
-        "\tlen = sprintf_s(line, sizeof(line), \"%s\\r\\n\", text);\r\n"
-        "\tif (len > 0)\r\n\t{\r\n\t\tWriteFile(h, line, (DWORD)len, NULL, NULL);\r\n\t}\r\n"
-        "\tCloseHandle(h);\r\n"
-        "}\r\n"
-        "\r\n",
-    )
-    inject(
-        sw,
-        "\tw = NewWizard(ICO_SETUP, BMP_SELOGO49x49, verstr, sw);\r\n",
-        "\r\n\tSwTrace(\"wizard created\");\r\n",
-    )
-    inject(
-        sw,
-        "\tInitWinUi(verstr, _SS(\"DEFAULT_FONT\"), _II(\"DEFAULT_FONT_SIZE\"));\r\n",
-        "\r\n\tSwTrace(MsIsAdmin() ? \"ui ready, admin\" : \"ui ready, not admin\");\r\n",
-    )
-    inject(
-        sw,
-        "\tEnumResourceNamesA(NULL, SW_SFX_RESOURCE_TYPE, SwEnumResourceNamesProc, (LONG_PTR)(&is_datafile_exists));\r\n",
-        "\r\n\tSwTrace(is_datafile_exists ? \"exec: datafile resources found\" : \"exec: no datafile resources\");\r\n",
-    )
-    inject(
-        sw,
-        "\tInitCedar();\r\n",
-        "\r\n\tSwTrace(\"exec: mayaqua and cedar are ready\");\r\n",
-    )
-    inject(
-        sw,
-        "\t\t// Start the Setup Wizard\r\n",
-        "\t\tSwTrace(\"exec: entering the wizard main\");\r\n",
-    )
-    inject(
-        sw,
-        "\tchar ver[MAX_SIZE];\r\n\r\n\t// Define the wizard UI\r\n",
-        "\tSwTrace(\"main: entered\");\r\n\r\n",
-    )
-    inject(
-        sw,
-        "\t// Parse the command line\r\n\tSwParseCommandLine(sw);\r\n",
-        "\r\n\tSwTrace(\"arguments parsed\");\r\n",
-    )
-    inject(
-        sw,
-        "\t// Detect the installable components\r\n\tSwDetectComponents(sw);\r\n",
-        "\r\n\tSwTrace(\"components detected\");\r\n",
-    )
-    inject(
-        sw,
-        "\t\t// UI main\r\n\t\t\tSwUiMain(sw);\r\n",
-        "\r\n\tSwTrace(\"wizard closed\");\r\n",
-    )
-    with open(sw, encoding="utf-8", newline="") as stream:
-        text = stream.read()
-    pattern = re.compile(r"([ \t]*)ShowWizard\(NULL, w, start_page\);")
-    matches = pattern.findall(text)
-    if len(matches) < 1:
-        raise SystemExit("no ShowWizard call found")
-    text = pattern.sub(
-        lambda m: m.group(0) + "\r\n" + m.group(1) + 'SwTrace("showing the wizard");',
-        text,
-    )
-    with open(sw, "w", encoding="utf-8", newline="") as stream:
-        stream.write(text)
-    log(f"  traced {len(matches)} ShowWizard call sites")
 
 
 def install_feature() -> None:
@@ -374,7 +256,6 @@ def main() -> None:
     fetch()
 
     patch_sfx_dialog()
-    trace_setup_flow()
     fix_hamcore_outputs()
 
     patches = sorted((ROOT / "patches").glob("*.patch"))

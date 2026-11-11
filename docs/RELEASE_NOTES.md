@@ -49,4 +49,6 @@ rules...*) in `vpncmgr.exe` that connects or disconnects a VPN Client
 connection depending on the Wi-Fi SSID or the Ethernet default gateway. Rules
 live in `%ProgramData%\SoftEther VPN Client\net_rules.ini`.
 
-Not verified on a real desktop yet: see the smoke test in the README.
+The setup wizard of both installers was started on a Windows runner and shows
+its window within two seconds; the interactive installation itself still needs a
+desktop, see the smoke test in the README.
