@@ -16,6 +16,9 @@ jobs:
           echo "using the installers of $run"
           gh run download "$run" -R "$GITHUB_REPOSITORY" -n softether-installers-5.2.5189 -D new
           ls -l new
+          gh release download 5.2.5189 -R softethervpn/softethervpn -p 'softether-vpnclient-5.02.5187.x64.exe' -D probe --clobber
+          mv probe/softether-vpnclient-5.02.5187.x64.exe probe/official.exe
+          ls -l probe
       - name: Cross check the two setup programs
         shell: pwsh
         run: |
