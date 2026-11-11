@@ -34,7 +34,6 @@ jobs:
               static extern IntPtr LockResource(IntPtr data);
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern uint SizeofResource(IntPtr module, IntPtr res);
-              [DllImport("kernel32.dll")]
               public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
               [DllImport("kernel32.dll", SetLastError = true)]
               public static extern bool EnumResourceNamesA(IntPtr module, string type, Proc p, IntPtr l);
