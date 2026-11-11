@@ -19,16 +19,59 @@ jobs:
       - name: Trace the setup flow
         shell: pwsh
         run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Text;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+
+          public class Win
+          {
+              public delegate bool Proc(IntPtr h, IntPtr l);
+              [DllImport("user32.dll")] public static extern bool EnumWindows(Proc p, IntPtr l);
+              [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+
+              public static string Dump(uint pid)
+              {
+                  var list = new List<string>();
+                  EnumWindows((h, l) =>
+                  {
+                      uint p;
+                      GetWindowThreadProcessId(h, out p);
+                      if (p == pid)
+                      {
+                          var c = new StringBuilder(256);
+                          var t = new StringBuilder(256);
+                          GetClassNameW(h, c, 256);
+                          GetWindowTextW(h, t, 256);
+                          list.Add(c.ToString() + " | " + t.ToString() + " | visible=" + IsWindowVisible(h));
+                      }
+                      return true;
+                  }, IntPtr.Zero);
+                  return list.Count == 0 ? "no window" : string.Join(" ;; ", list);
+              }
+          }
+          '@
           $env:SOFTETHER_SETUP_TRACE = 'C:\trace.txt'
           $exe = (Get-ChildItem new\softether-vpnclient-*.exe | Select-Object -First 1).FullName
           "installer: $exe"
           Remove-Item $env:SOFTETHER_SETUP_TRACE -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
           $p = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 10
+          for ($i = 0; $i -lt 5; $i++) {
+            Start-Sleep -Seconds 2
+            $child = Get-CimInstance Win32_Process -Filter "Name='vpnsetup.exe' AND ProcessId<>$($p.Id)" | Select-Object -First 1
+            if ($child) {
+              try { $c = Get-Process -Id $child.ProcessId -ErrorAction Stop; "$($i) child cpu=$([math]::Round($c.TotalProcessorTime.TotalSeconds,2)) -> $([Win]::Dump([uint32]$c.Id))" } catch { "$($i) child gone" }
+            } else {
+              "$($i) no child yet"
+            }
+          }
           'trace:'
           if (Test-Path $env:SOFTETHER_SETUP_TRACE) { Get-Content $env:SOFTETHER_SETUP_TRACE } else { 'no trace' }
-          Get-CimInstance Win32_Process -Filter "Name='vpnsetup.exe' OR Name='vpncmgr.exe' OR Name='vpncmd.exe' OR Name='vpnclient.exe'" | ForEach-Object { "proc $($_.ProcessId) $($_.Name): $($_.CommandLine)" }
           Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory | ForEach-Object { "dir $($_.Name): " + ((Get-ChildItem $_.FullName | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ') }
           Get-Process -Name vpnsetup,vpncmgr,vpnclient,vpncmd -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
