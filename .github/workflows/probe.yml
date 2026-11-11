@@ -14,7 +14,65 @@ jobs:
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
 
-      - name: Does the dialog answer messages
+      - name: Decompress the resources with real zlib
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.IO;
+          using System.Runtime.InteropServices;
+
+          public class Res
+          {
+              [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+              static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern IntPtr FindResourceA(IntPtr module, string name, string type);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern IntPtr LoadResource(IntPtr module, IntPtr res);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern IntPtr LockResource(IntPtr data);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern uint SizeofResource(IntPtr module, IntPtr res);
+              [DllImport("kernel32.dll")]
+              public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              public static extern bool EnumResourceNamesA(IntPtr module, string type, Proc p, IntPtr l);
+
+              public static System.Collections.Generic.List<string> Names(string path)
+              {
+                  var list = new System.Collections.Generic.List<string>();
+                  IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
+                  if (h == IntPtr.Zero) throw new Exception("load failed " + Marshal.GetLastWin32Error());
+                  EnumResourceNamesA(h, "DATAFILE", (m, t, n, l) => { list.Add(Marshal.PtrToStringAnsi(n)); return true; }, IntPtr.Zero);
+                  return list;
+              }
+
+              public static void Dump(string path, string name, string dst)
+              {
+                  IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
+                  IntPtr r = FindResourceA(h, name, "DATAFILE");
+                  if (r == IntPtr.Zero) throw new Exception("no resource " + name);
+                  uint size = SizeofResource(h, r);
+                  IntPtr data = LockResource(LoadResource(h, r));
+                  byte[] buf = new byte[size];
+                  Marshal.Copy(data, buf, 0, (int)size);
+                  File.WriteAllBytes(dst, buf);
+              }
+          }
+          '@
+          New-Item -ItemType Directory -Force probe\res | Out-Null
+          foreach ($n in [Res]::Names((Resolve-Path 'probe\ours.exe'))) {
+            $f = "probe\res\$n"
+            [Res]::Dump((Resolve-Path 'probe\ours.exe'), $n, $f)
+            $raw = [System.IO.File]::ReadAllBytes($f)
+            $declared = [BitConverter]::ToUInt32($raw, 0)
+            "resource $n size=$($raw.Length) declared=$declared"
+            python3 -c "import sys,zlib,struct;d=open(sys.argv[1],'rb').read();n=struct.unpack('<I',d[:4])[0];out=zlib.decompress(d[4:]);print('  zlib ok declared=%d actual=%d' % (n,len(out)))" $f
+            if ($LASTEXITCODE -ne 0) { "  zlib FAILED" }
+          }
+
+      - name: Is the dialog starving its timer
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -28,10 +86,8 @@ jobs:
               [DllImport("user32.dll")] public static extern bool EnumWindows(Proc p, IntPtr l);
               [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
               [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
-              [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-              [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+              [DllImport("user32.dll")] public static extern bool GetUpdateRect(IntPtr h, IntPtr rect, bool erase);
+              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
 
               public static IntPtr Find(uint pid, string cls)
               {
@@ -52,26 +108,11 @@ jobs:
               }
           }
           '@
-
           $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
-          Start-Sleep -Seconds 5
-          $dlg = [Win]::Find([uint32]$p.Id, '#32770')
-          "dialog=0x$($dlg.ToString('x'))"
-          $r = [IntPtr]::Zero
-          $ok = [Win]::SendMessageTimeout($dlg, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero, 0, 3000, [ref]$r)
-          "wm_null answered=$($ok -ne [IntPtr]::Zero) result=$r"
-          "cancel enabled before=$([Win]::IsWindowEnabled($dlg))"
-          # ask the dialog to run its timer handler by hand
-          [Win]::PostMessage($dlg, 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
-          Start-Sleep -Seconds 12
-          $p.Refresh()
-          "cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s exited=$($p.HasExited)"
-          Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | ForEach-Object { "child $($_.ProcessId) $($_.CommandLine)" }
-          Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -ErrorAction SilentlyContinue | ForEach-Object {
-            "temp $($_.Name)"
-            Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { "  $($_.Name) $($_.Length)" }
+          foreach ($i in 1..4) {
+            Start-Sleep -Seconds 2
+            $p.Refresh()
+            $dlg = [Win]::Find([uint32]$p.Id, '#32770')
+            "t=$($i*2)s cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s dialog=$($dlg -ne [IntPtr]::Zero) dirty=$([Win]::GetUpdateRect($dlg, [IntPtr]::Zero, $false))"
           }
-          $dlg2 = [Win]::Find([uint32]$p.Id, '#32770')
-          "dialog still there=$($dlg2 -ne [IntPtr]::Zero)"
           Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
