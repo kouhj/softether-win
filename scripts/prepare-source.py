@@ -219,16 +219,17 @@ def fix_hamcore_outputs() -> None:
     generator expression keeps the configuration suffix out of the path.
     """
     log("fixing the hamcore staging directories")
-    needle = 'RUNTIME_OUTPUT_DIRECTORY "${TOP_DIRECTORY}/src/bin/hamcore"'
-    replacement = 'RUNTIME_OUTPUT_DIRECTORY "${TOP_DIRECTORY}/src/bin/hamcore/$<0:>"'
     for name in ("PenCore", "vpndrvinst"):
         cmake = SOURCE / "src" / name / "CMakeLists.txt"
         with open(cmake, encoding="utf-8", newline="") as stream:
             text = stream.read()
-        if text.count(needle) != 1:
-            raise SystemExit(f"unexpected RUNTIME_OUTPUT_DIRECTORY in {cmake}")
+        for kind in ("ARCHIVE", "LIBRARY", "RUNTIME"):
+            needle = f'{kind}_OUTPUT_DIRECTORY "${{TOP_DIRECTORY}}/src/bin/hamcore"'
+            if text.count(needle) != 1:
+                raise SystemExit(f"unexpected {kind}_OUTPUT_DIRECTORY in {cmake}")
+            text = text.replace(needle, f'{kind}_OUTPUT_DIRECTORY "${{TOP_DIRECTORY}}/src/bin/hamcore/$<0:>"')
         with open(cmake, "w", encoding="utf-8", newline="") as stream:
-            stream.write(text.replace(needle, replacement))
+            stream.write(text)
         log(f"  {name} writes into src/bin/hamcore without a configuration folder")
 
 
