@@ -25,24 +25,10 @@ jobs:
         run: |
           Add-Type -TypeDefinition @'
           using System;
-          using System.Collections.Generic;
           using System.Runtime.InteropServices;
 
           public class Sampler
           {
-              [StructLayout(LayoutKind.Sequential)]
-              public struct CONTEXT
-              {
-                  public ulong P1Home, P2Home, P3Home, P4Home, P5Home, P6Home;
-                  public uint ContextFlags;
-                  public uint MxCsr;
-                  public ushort SegCs, SegDs, SegEs, SegFs, SegGs, SegSs;
-                  public uint EFlags;
-                  public ulong Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;
-                  public ulong Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi;
-                  public ulong R8, R9, R10, R11, R12, R13, R14, R15, Rip;
-              }
-
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern IntPtr OpenThread(uint access, bool inherit, uint tid);
 
@@ -56,7 +42,7 @@ jobs:
               static extern bool CloseHandle(IntPtr h);
 
               [DllImport("kernel32.dll", SetLastError = true)]
-              static extern bool GetThreadContext(IntPtr h, ref CONTEXT c);
+              static extern bool GetThreadContext(IntPtr hThread, IntPtr lpContext);
 
               public static string Sample(uint tid, ulong moduleBase)
               {
@@ -72,10 +58,19 @@ jobs:
                       if (prev == 0xFFFFFFFF) return "suspend failed " + Marshal.GetLastWin32Error();
                       try
                       {
-                          CONTEXT c = new CONTEXT();
-                          c.ContextFlags = CONTEXT_CONTROL;
-                          if (!GetThreadContext(h, ref c)) return "context failed " + Marshal.GetLastWin32Error();
-                          return string.Format("rip=+0x{0:x} rsp=0x{1:x}", c.Rip - moduleBase, c.Rsp);
+                          IntPtr raw = Marshal.AllocHGlobal(0x600);
+                          try
+                          {
+                              long aligned = (raw.ToInt64() + 15) & ~15L;
+                              IntPtr p = new IntPtr(aligned);
+                              for (int i = 0; i < 0x600; i++) Marshal.WriteByte(p, i, 0);
+                              Marshal.WriteInt32(p, 0x30, unchecked((int)CONTEXT_CONTROL));
+                              if (!GetThreadContext(h, p)) return "context failed " + Marshal.GetLastWin32Error();
+                              long rip = Marshal.ReadInt64(p, 0xF8);
+                              long rsp = Marshal.ReadInt64(p, 0x98);
+                              return string.Format("rip=+0x{0:x} rsp=0x{1:x}", rip - (long)moduleBase, rsp);
+                          }
+                          finally { Marshal.FreeHGlobal(raw); }
                       }
                       finally { ResumeThread(h); }
                   }
@@ -106,4 +101,5 @@ jobs:
           }
 
           Watch 'probe\ours.exe' 'our installer'
-          Watch 'probe\zip\vpnsetup.exe' 'our vpnsetup.exe alone'
+          $setup = (Get-ChildItem 'probe\zip' -Recurse -Filter vpnsetup.exe | Select-Object -First 1).FullName
+          Watch $setup 'our vpnsetup.exe alone'
