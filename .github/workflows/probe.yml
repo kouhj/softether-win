@@ -15,8 +15,7 @@ jobs:
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
-
-      - name: Swap the payloads
+      - name: Build the variants
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -45,6 +44,8 @@ jobs:
               public static extern bool UpdateResourceA(IntPtr update, string type, string name, ushort lang, byte[] data, uint size);
               [DllImport("kernel32.dll", SetLastError = true)]
               public static extern bool EndUpdateResourceW(IntPtr update, bool discard);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              static extern bool EnumResourceNamesH(IntPtr module, string type, Proc p, IntPtr l);
 
               public delegate bool Proc(IntPtr module, IntPtr type, IntPtr name, IntPtr l);
 
@@ -52,22 +53,15 @@ jobs:
               {
                   var list = new List<string>();
                   IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
-                  if (h == IntPtr.Zero) throw new Exception("load failed " + path);
                   EnumResourceNamesH(h, type, (m, t, n, l) => { list.Add(Marshal.PtrToStringAnsi(n)); return true; }, IntPtr.Zero);
                   FreeLibrary(h);
                   return list;
               }
 
-              [DllImport("kernel32.dll", SetLastError = true)]
-              static extern bool EnumResourceNamesH(IntPtr module, string type, Proc p, IntPtr l);
-
-              public static int Count(string path, string type) { return Names(path, type).Count; }
-
-              public static byte[] Data(string path, string type, string name)
+              public static byte[] Data(string path, string name)
               {
                   IntPtr h = LoadLibraryExW(path, IntPtr.Zero, 2);
-                  IntPtr r = FindResourceA(h, name, type);
-                  if (r == IntPtr.Zero) throw new Exception("no resource " + name);
+                  IntPtr r = FindResourceA(h, name, "DATAFILE");
                   uint size = SizeofResource(h, r);
                   byte[] buf = new byte[size];
                   Marshal.Copy(LockResource(LoadResource(h, r)), buf, 0, (int)size);
@@ -75,45 +69,34 @@ jobs:
                   return buf;
               }
 
-              public static void Copy(string from, string to, string[] names, bool deleteFirst)
+              public static void Copy(string from, string to, string[] names)
               {
                   IntPtr u = BeginUpdateResourceW(to, false);
-                  if (u == IntPtr.Zero) throw new Exception("begin update failed " + Marshal.GetLastWin32Error());
-                  bool discard = true;
-                  try
+                  foreach (string n in names)
                   {
-                      if (deleteFirst)
-                          foreach (string n in names)
-                              if (!UpdateResourceA(u, "DATAFILE", n, 0, null, 0)) throw new Exception("delete failed " + n);
-                      foreach (string n in names)
-                      {
-                          byte[] data = Data(from, "DATAFILE", n);
-                          if (!UpdateResourceA(u, "DATAFILE", n, 0, data, (uint)data.Length)) throw new Exception("update failed " + n);
-                      }
-                      discard = false;
+                      byte[] data = Data(from, n);
+                      if (!UpdateResourceA(u, "DATAFILE", n, 0, data, (uint)data.Length)) throw new Exception("update failed " + n);
                   }
-                  finally
-                  {
-                      if (!EndUpdateResourceW(u, discard)) throw new Exception("end update failed");
-                  }
+                  if (!EndUpdateResourceW(u, false)) throw new Exception("end update failed");
               }
           }
           '@
-          foreach ($pair in @(@('probe\official.exe', 'official'), @('probe\ours.exe', 'ours'))) {
-            $path = $pair[0]; $label = $pair[1]
-            $line = "$label"
-            foreach ($t in @(3, 14, 5, 16, 24, 10)) {
-              $line += " type$t=$([Res]::Count((Resolve-Path $path), $t.ToString()))"
-            }
-            $line
-            $names = [Res]::Names((Resolve-Path $path), 'DATAFILE')
-            "  datafile: $($names -join ',')"
+          $ours = (Resolve-Path 'probe\ours.exe').Path
+          $official = (Resolve-Path 'probe\official.exe').Path
+          $all = [Res]::Names($ours, 'DATAFILE')
+          "our payload entries: $($all -join ',')"
+          $variants = @(
+            @{ Name = 'A-all';                  Files = $all },
+            @{ Name = 'B-no-hamcore';           Files = ($all | Where-Object { $_ -ne 'RAW_HAMCORE.SE2' }) },
+            @{ Name = 'C-hamcore-only';         Files = @('RAW_HAMCORE.SE2') },
+            @{ Name = 'D-no-vpnsetup';          Files = ($all | Where-Object { $_ -ne 'VPNSETUP.EXE' }) }
+          )
+          foreach ($v in $variants) {
+            $dst = "probe\official+$($v.Name).exe"
+            Copy-Item $official $dst
+            [Res]::Copy($ours, (Resolve-Path $dst).Path, $v.Files)
+            "$($v.Name): $($v.Files -join ',')"
           }
-          Copy-Item 'probe\official.exe' 'probe\official+ours-payload.exe'
-          [Res]::Copy((Resolve-Path 'probe\ours.exe'), (Resolve-Path 'probe\official+ours-payload.exe'), [Res]::Names((Resolve-Path 'probe\ours.exe'), 'DATAFILE'))
-          Copy-Item 'probe\ours.exe' 'probe\ours+official-payload.exe'
-          [Res]::Copy((Resolve-Path 'probe\official.exe'), (Resolve-Path 'probe\ours+official-payload.exe'), [Res]::Names((Resolve-Path 'probe\official.exe'), 'DATAFILE'), $true)
-          "built the two hybrids"
 
       - name: Run them
         shell: pwsh
@@ -150,21 +133,26 @@ jobs:
               }
           }
           '@
-          function Run([string]$exe, [string]$label) {
-            "=== $label"
+          function Run([string]$exe) {
             $p = Start-Process -FilePath $exe -PassThru
-            Start-Sleep -Seconds 6
-            $p.Refresh()
-            $dlg = [Win]::Find([uint32]$p.Id, '#32770')
-            "  cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s dialog=$($dlg -ne [IntPtr]::Zero) dirty=$([Win]::GetUpdateRect($dlg, [IntPtr]::Zero, $false))"
-            Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | ForEach-Object { "  child $($_.ProcessId)" }
-            Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -ErrorAction SilentlyContinue | ForEach-Object {
-              "  temp $($_.Name): " + ((Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Length)" }) -join ' ')
+            $trace = @()
+            for ($i = 0; $i -lt 8; $i++) {
+              Start-Sleep -Seconds 1
+              $p.Refresh()
+              $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+              $files = if ($dir) { (Get-ChildItem $dir.FullName -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ' } else { '-' }
+              $kids = (Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | Measure-Object).Count
+              $trace += "t=$($i+1) cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2)) children=$kids files=$files"
             }
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            $dlg = [Win]::Find([uint32]$p.Id, '#32770')
+            if ($p.HasExited -eq $false) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
             Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
             Start-Sleep -Seconds 2
             Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
+            "=== $([IO.Path]::GetFileName($exe)) exited=$($p.HasExited) dialog=$($dlg -ne [IntPtr]::Zero)"
+            $trace
           }
-          Run 'probe\official+ours-payload.exe' 'official binary, our payload'
-          Run 'probe\ours+official-payload.exe' 'our binary, official payload'
+          Run 'probe\official+A-all.exe'
+          Run 'probe\official+B-no-hamcore.exe'
+          Run 'probe\official+C-hamcore-only.exe'
+          Run 'probe\official+D-no-vpnsetup.exe'
