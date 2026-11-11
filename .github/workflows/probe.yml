@@ -42,7 +42,7 @@ jobs:
               static extern IntPtr BeginUpdateResourceW(string file, bool delete);
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern bool UpdateResourceA(IntPtr update, string type, string name, ushort lang, byte[] data, uint size);
-              [DllImport("kernel32.dll", SetLastError = true)]
+              [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "UpdateResourceA")]
               static extern bool UpdateResourceI(IntPtr update, IntPtr type, IntPtr name, ushort lang, byte[] data, uint size);
               [DllImport("kernel32.dll", SetLastError = true)]
               static extern bool EndUpdateResourceW(IntPtr update, bool discard);
