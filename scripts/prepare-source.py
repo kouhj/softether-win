@@ -214,16 +214,16 @@ def trace_setup_flow() -> None:
     sw = SOURCE / "src" / "Cedar" / "SW.c"
     inject(
         sw,
-        "void SwUiMain(SW *sw)\r\n",
+        "// Show the UI\r\n",
         "// Appends one line to the file named by SOFTETHER_SETUP_TRACE\r\n"
         "static void SwTrace(const char *text)\r\n"
         "{\r\n"
-        "\twchar_t path[MAX_SIZE];\r\n"
+        "\twchar_t path[MAX_PATH];\r\n"
         "\tHANDLE h;\r\n"
-        "\tchar line[MAX_SIZE];\r\n"
+        "\tchar line[1024];\r\n"
         "\tint len;\r\n"
         "\r\n"
-        "\tif (GetEnvironmentVariableW(L\"SOFTETHER_SETUP_TRACE\", path, MAX_SIZE) == 0)\r\n"
+        "\tif (GetEnvironmentVariableW(L\"SOFTETHER_SETUP_TRACE\", path, MAX_PATH) == 0)\r\n"
         "\t{\r\n\t\treturn;\r\n\t}\r\n"
         "\r\n"
         "\th = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,\r\n"
