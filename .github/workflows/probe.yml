@@ -50,7 +50,7 @@ jobs:
               }
           }
           '@
-          function Dump([uint32]$pid) {
+          function Dump([uint32]$procId) {
             $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($dir) { (Get-ChildItem $dir.FullName -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ' } else { '-' }
           }
