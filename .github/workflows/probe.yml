@@ -55,25 +55,43 @@ jobs:
               }
           }
           '@
-          $env:SOFTETHER_SFX_TRACE = (Join-Path (Get-Location) 'sfx.txt')
-          Remove-Item $env:SOFTETHER_SFX_TRACE -ErrorAction SilentlyContinue
+          function Show-Temp([string]$label) {
+            Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+              "$label $($_.Name): " + ((Get-ChildItem $_.FullName -File | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ')
+            }
+          }
           Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
           $exe = (Get-ChildItem 'new' -Filter 'softether-vpnclient-*.exe' | Select-Object -First 1).FullName
-          "installer: $exe $((Get-Item $exe).Length) bytes"
           $proc = Start-Process -FilePath $exe -PassThru
-          for ($i = 0; $i -lt 4; $i++) {
-            Start-Sleep -Seconds 1
-            $proc.Refresh()
-            "t=$($i+1)s cpu=$([math]::Round($proc.TotalProcessorTime.TotalSeconds,2)) exited=$($proc.HasExited) -> $([Win]::Dump([uint32]$proc.Id))"
-          }
+          Start-Sleep -Seconds 3
+          Show-Temp 'parent'
           $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" | Select-Object -First 1
-          if ($child) { Start-Sleep -Seconds 2; "child $($child.Name) -> $([Win]::Dump([uint32]$child.ProcessId))" }
-          $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($dir) { "temp $($dir.Name): " + ((Get-ChildItem $dir.FullName -File | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' ') }
-          if (Test-Path $env:SOFTETHER_SFX_TRACE) {
-            $lines = Get-Content $env:SOFTETHER_SFX_TRACE
-            "trace: $($lines.Count) messages, first 30: $($lines[0..([Math]::Min(29, $lines.Count - 1))] -join ', ')"
+          if ($child) {
+            $cp = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue
+            for ($i = 0; $i -lt 4; $i++) {
+              Start-Sleep -Seconds 1
+              $cp.Refresh()
+              "child t=$($i+1)s cpu=$([math]::Round($cp.TotalProcessorTime.TotalSeconds,2)) exited=$($cp.HasExited) -> $([Win]::Dump([uint32]$cp.Id))"
+            }
+            "child command line: $($child.CommandLine)"
           }
-          else { "trace: no log" }
+          else { "no child" }
+          Show-Temp 'after'
           Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 1
+          # run the setup program from the extracted directory by hand
+          $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -First 1
+          if ($dir) {
+            "manual run from $($dir.FullName)"
+            $setup = Join-Path $dir.FullName 'vpnsetup.exe'
+            if (Test-Path $setup) {
+              $m = Start-Process -FilePath $setup -ArgumentList "/CALLERSFXPATH:`"$(Join-Path $dir.FullName 'installer.cache')`"", '/ISEASYINSTALLER:0' -WorkingDirectory $dir.FullName -PassThru
+              for ($i = 0; $i -lt 4; $i++) {
+                Start-Sleep -Seconds 1
+                $m.Refresh()
+                "manual t=$($i+1)s cpu=$([math]::Round($m.TotalProcessorTime.TotalSeconds,2)) exited=$($m.HasExited) code=$($m.ExitCode) -> $([Win]::Dump([uint32]$m.Id))"
+              }
+              Stop-Process -Id $m.Id -Force -ErrorAction SilentlyContinue
+            }
+          }
