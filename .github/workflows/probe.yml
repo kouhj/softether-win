@@ -15,7 +15,7 @@ jobs:
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
-      - name: Poke, then inspect
+      - name: Compare the extracted setup programs
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -52,7 +52,7 @@ jobs:
                   return found;
               }
 
-              public static List<string> Windows(uint pid)
+              public static string Dump(uint pid)
               {
                   var list = new List<string>();
                   EnumWindows((h, l) =>
@@ -69,38 +69,49 @@ jobs:
                       }
                       return true;
                   }, IntPtr.Zero);
-                  return list;
+                  return list.Count == 0 ? "no window" : string.Join(" ;; ", list);
               }
           }
           '@
-          function Files([string]$dir) {
-            if (-not $dir) { return '-' }
-            (Get-ChildItem $dir -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' '
+          # 1. the official child wizard
+          $official = Start-Process -FilePath 'probe\official.exe' -PassThru
+          Start-Sleep -Seconds 3
+          $c1 = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($official.Id)" | Select-Object -First 1
+          if ($c1) {
+            Start-Sleep -Seconds 2
+            "official child: $($c1.Name) -> $([Win]::Dump([uint32]$c1.ProcessId))"
           }
-          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
-          Start-Sleep -Seconds 2
-          $dlg = [Win]::Find([uint32]$p.Id, '#32770')
-          [Win]::PostMessage($dlg, 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
-          Start-Sleep -Seconds 6
-          $dir = (Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1)
-          "parent windows:"; [Win]::Windows([uint32]$p.Id) | ForEach-Object { "  $_" }
-          "temp: $(Files $dir.FullName)"
-          $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | Select-Object -First 1
-          if ($child) {
-            "child: $($child.Name) $($child.CommandLine)"
-            $cp = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue
-            "child cpu=$([math]::Round($cp.TotalProcessorTime.TotalSeconds,2))"
-            "child windows:"; [Win]::Windows([uint32]$child.ProcessId) | ForEach-Object { "  $_" }
-          }
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $official.Id -Force -ErrorAction SilentlyContinue
           Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep -Seconds 2
-          "--- run the extracted vpnsetup.exe directly"
-          $tmp = $dir.FullName
-          $q = Start-Process -FilePath (Join-Path $tmp 'vpnsetup.exe') -WorkingDirectory $tmp -PassThru
-          Start-Sleep -Seconds 6
-          $q.Refresh()
-          "direct output windows (cpu=$([math]::Round($q.TotalProcessorTime.TotalSeconds,2)) exited=$($q.HasExited)):"
-          [Win]::Windows([uint32]$q.Id) | ForEach-Object { "  $_" }
-          "temp after direct run: $(Files $tmp)"
-          Stop-Process -Id $q.Id -Force -ErrorAction SilentlyContinue
+          $official_dir = (Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory | Select-Object -First 1).FullName
+          "official temp: $official_dir"
+          # 2. the official setup program run directly
+          $o = Start-Process -FilePath (Join-Path $official_dir 'vpnsetup.exe') -WorkingDirectory $official_dir -PassThru
+          Start-Sleep -Seconds 5
+          "official direct: cpu=$([math]::Round($o.TotalProcessorTime.TotalSeconds,2)) exited=$($o.HasExited) -> $([Win]::Dump([uint32]$o.Id))"
+          Stop-Process -Id $o.Id -Force -ErrorAction SilentlyContinue
+          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
+          # 3. extract our payload and run our setup program
+          $ours = Start-Process -FilePath 'probe\ours.exe' -PassThru
+          Start-Sleep -Seconds 2
+          [Win]::PostMessage([Win]::Find([uint32]$ours.Id, '#32770'), 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
+          Start-Sleep -Seconds 4
+          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
+          Stop-Process -Id $ours.Id -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          $ours_dir = (Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory | Select-Object -First 1).FullName
+          "ours temp: $ours_dir"
+          $v = Start-Process -FilePath (Join-Path $ours_dir 'vpncmd.exe') -ArgumentList 'localhost','/CMD','Version' -WorkingDirectory (Join-Path (Get-Location) 'probe') -RedirectStandardOutput 'probe\vpncmd.out' -RedirectStandardError 'probe\vpncmd.err' -PassThru -NoNewWindow
+          $v.WaitForExit(20000) | Out-Null
+          "vpncmd exit=$($v.ExitCode)"
+          "vpncmd out: $((Get-Content 'probe\vpncmd.out' -ErrorAction SilentlyContinue) -join ' / ')"
+          "vpncmd err: $((Get-Content 'probe\vpncmd.err' -ErrorAction SilentlyContinue) -join ' / ')"
+          $w = Start-Process -FilePath (Join-Path $ours_dir 'vpnsetup.exe') -WorkingDirectory $ours_dir -PassThru
+          for ($i = 0; $i -lt 6; $i++) {
+            Start-Sleep -Seconds 2
+            $w.Refresh()
+            "ours setup t=$($i*2+2) cpu=$([math]::Round($w.TotalProcessorTime.TotalSeconds,2)) exited=$($w.HasExited) -> $([Win]::Dump([uint32]$w.Id))"
+          }
+          Stop-Process -Id $w.Id -Force -ErrorAction SilentlyContinue
