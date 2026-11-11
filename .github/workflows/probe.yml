@@ -18,13 +18,12 @@ jobs:
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-win-5.2.5189-x64.zip' -OutFile 'probe\binaries.zip'
           Expand-Archive 'probe\binaries.zip' -DestinationPath 'probe\zip' -Force
-      - name: Watch one extraction and test a single payload
+      - name: Test the declared size slack
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
           using System;
           using System.Text;
-          using System.Collections.Generic;
           using System.Runtime.InteropServices;
 
           public class Win
@@ -34,13 +33,11 @@ jobs:
               [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
               [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
               [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-              [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
-              [DllImport("kernel32.dll", SetLastError = true)] public static extern bool FreeLibrary(IntPtr h);
               [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr BeginUpdateResourceW(string path, bool delete);
               [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true, EntryPoint = "UpdateResourceA")] public static extern bool UpdateResourceA(IntPtr h, string type, string name, ushort lang, byte[] data, uint size);
               [DllImport("kernel32.dll", SetLastError = true)] public static extern bool EndUpdateResourceW(IntPtr h, bool discard);
 
-              public static IntPtr Find(uint pid, string cls)
+              public static IntPtr Find(uint pid)
               {
                   IntPtr found = IntPtr.Zero;
                   EnumWindows((h, l) =>
@@ -51,7 +48,7 @@ jobs:
                       {
                           var c = new StringBuilder(256);
                           GetClassNameW(h, c, 256);
-                          if (c.ToString() == cls) { found = h; return false; }
+                          if (c.ToString() == "#32770") { found = h; return false; }
                       }
                       return true;
                   }, IntPtr.Zero);
@@ -65,41 +62,38 @@ jobs:
             try { $z.Write($bytes, 0, $bytes.Length) } finally { $z.Dispose() }
             , $out.ToArray()
           }
-          function Invoke-Watch([string]$exe, [int]$milliseconds) {
-            $proc = Start-Process -FilePath $exe -PassThru
-            Start-Sleep -Milliseconds 1500
-            [Win]::PostMessage([Win]::Find([uint32]$proc.Id, '#32770'), 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
-            $last = ''
-            $deadline = [DateTime]::UtcNow.AddMilliseconds($milliseconds)
-            while ([DateTime]::UtcNow -lt $deadline) {
-              $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-              if ($dir) {
-                $line = (Get-ChildItem $dir.FullName -File -ErrorAction SilentlyContinue |
-                  Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Length)" }) -join ' '
-                if ($line -ne $last) { "  t+$([int](([DateTime]::UtcNow - $deadline).TotalMilliseconds + $milliseconds))ms $line"; $last = $line }
-              }
-              Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $proc.Id } | Stop-Process -Force -ErrorAction SilentlyContinue
-              Start-Sleep -Milliseconds 100
-            }
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
-          }
-          "== our installer"
-          Invoke-Watch (Resolve-Path 'probe\ours.exe').Path 4000
-          "== single compressed payload on the official base"
-          $source = Get-ChildItem 'probe\*' -Recurse -Filter 'vpnclient.exe' | Select-Object -First 1
-          "source: $($source.FullName) $($source.Length)"
+          $source = Get-ChildItem 'probe\zip' -Recurse -Filter 'vpnclient.exe' | Select-Object -First 1
           $bytes = [System.IO.File]::ReadAllBytes($source.FullName)
           $packed = Compress-ZLib $bytes
-          $payload = [byte[]]::new(4 + $packed.Length)
-          [BitConverter]::GetBytes([uint32]$bytes.Length).CopyTo($payload, 0)
-          $packed.CopyTo($payload, 4)
-          Copy-Item 'probe\official.exe' 'probe\one.exe' -Force
-          $update = [Win]::BeginUpdateResourceW((Resolve-Path 'probe\one.exe').Path, $false)
-          "update handle: $update"
-          [Win]::UpdateResourceA($update, 'DATAFILE', 'VPNCLIENT.EXE', 0, $payload, $payload.Length)
-          [Win]::EndUpdateResourceW($update, $false)
-          "one.exe: $((Get-Item 'probe\one.exe').Length)"
-          Invoke-Watch (Resolve-Path 'probe\one.exe').Path 4000
+          "source $($bytes.Length) packed $($packed.Length)"
+          $base = 'probe\v3.exe'
+          # our own setup program with the DATAFILE resources removed
+          Copy-Item 'probe\zip\softether-win-5.2.5189-x64\vpnsetup.exe' 'probe\base.exe' -Force
+          foreach ($slack in 0, 1, 64) {
+            $name = "probe\t$slack.exe"
+            Copy-Item 'probe\base.exe' $name -Force
+            $payload = [byte[]]::new(4 + $packed.Length)
+            [BitConverter]::GetBytes([uint32]($bytes.Length + $slack)).CopyTo($payload, 0)
+            $packed.CopyTo($payload, 4)
+            $update = [Win]::BeginUpdateResourceW((Resolve-Path $name).Path, $false)
+            [Win]::UpdateResourceA($update, 'DATAFILE', 'VPNCLIENT.EXE', 0, $payload, $payload.Length) | Out-Null
+            [Win]::EndUpdateResourceW($update, $false) | Out-Null
+            Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
+            $proc = Start-Process -FilePath (Resolve-Path $name).Path -PassThru
+            Start-Sleep -Milliseconds 1500
+            [Win]::PostMessage([Win]::Find([uint32]$proc.Id), 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
+            Start-Sleep -Seconds 3
+            Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            $dir = Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dir) {
+              $file = Join-Path $dir.FullName 'vpnclient.exe'
+              if (Test-Path $file) {
+                $hash = (Get-FileHash $file -Algorithm SHA256).Hash
+                $want = (Get-FileHash $source.FullName -Algorithm SHA256).Hash
+                "slack $slack -> $((Get-Item $file).Length) bytes, match=$($hash -eq $want)"
+              }
+              else { "slack $slack -> vpnclient.exe was not written" }
+            }
+            else { "slack $slack -> no temp directory" }
+          }
