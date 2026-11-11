@@ -13,10 +13,8 @@ jobs:
           New-Item -ItemType Directory -Force probe | Out-Null
           Invoke-WebRequest -UseBasicParsing `
             -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
 
-      - name: List every window of both installers
+      - name: Does the dialog answer messages
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
@@ -27,63 +25,53 @@ jobs:
           public class Win
           {
               public delegate bool Proc(IntPtr h, IntPtr l);
-              [DllImport("user32.dll")] static extern bool EnumWindows(Proc p, IntPtr l);
-              [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, Proc p, IntPtr l);
-              [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-              [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
-              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetDlgCtrlID(IntPtr h);
+              [DllImport("user32.dll")] public static extern bool EnumWindows(Proc p, IntPtr l);
+              [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+              [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+              [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+              [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
 
-              public static System.Collections.Generic.List<string> Dump(uint pid)
+              public static IntPtr Find(uint pid, string cls)
               {
-                  var lines = new System.Collections.Generic.List<string>();
+                  IntPtr found = IntPtr.Zero;
                   EnumWindows((h, l) =>
                   {
                       uint p;
                       GetWindowThreadProcessId(h, out p);
                       if (p == pid)
                       {
-                          lines.Add(Describe(h, ""));
-                          EnumChildWindows(h, (c, l2) => { lines.Add(Describe(c, "    ")); return true; }, IntPtr.Zero);
+                          var c = new StringBuilder(256);
+                          GetClassNameW(h, c, 256);
+                          if (c.ToString() == cls) { found = h; return false; }
                       }
                       return true;
                   }, IntPtr.Zero);
-                  return lines;
-              }
-
-              static string Describe(IntPtr h, string indent)
-              {
-                  var cls = new StringBuilder(256);
-                  var txt = new StringBuilder(1024);
-                  GetClassNameW(h, cls, 256);
-                  GetWindowTextW(h, txt, 1024);
-                  return string.Format("{0}{1} id={2} visible={3} class={4} text={5}",
-                      indent, h.ToString("x"), GetDlgCtrlID(h), IsWindowVisible(h), cls, txt.ToString().Replace("\r", " ").Replace("\n", " "));
+                  return found;
               }
           }
           '@
 
-          function Look([string]$exe, [string]$label) {
-            "=== $label"
-            $p = Start-Process -FilePath $exe -PassThru
-            Start-Sleep -Seconds 8
-            $p.Refresh()
-            "  cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s exited=$($p.HasExited)"
-            if (-not $p.HasExited) {
-              [Win]::Dump([uint32]$p.Id) | ForEach-Object { "  W $_" }
-              Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" |
-                ForEach-Object { "  child $($_.ProcessId) $($_.CommandLine)" }
-              $t = Join-Path $env:TEMP 'VPN_*'
-              Get-ChildItem $t -ErrorAction SilentlyContinue | ForEach-Object {
-                "  temp $($_.Name)"
-                Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { "    $($_.Name) $($_.Length)" }
-              }
-              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            }
-            Get-Process -Name vpnsetup,vpnclient,vpncmgr -ErrorAction SilentlyContinue | Stop-Process -Force
-            Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
+          Start-Sleep -Seconds 5
+          $dlg = [Win]::Find([uint32]$p.Id, '#32770')
+          "dialog=0x$($dlg.ToString('x'))"
+          $r = [IntPtr]::Zero
+          $ok = [Win]::SendMessageTimeout($dlg, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero, 0, 3000, [ref]$r)
+          "wm_null answered=$($ok -ne [IntPtr]::Zero) result=$r"
+          "cancel enabled before=$([Win]::IsWindowEnabled($dlg))"
+          # ask the dialog to run its timer handler by hand
+          [Win]::PostMessage($dlg, 0x0113, [IntPtr]1, [IntPtr]::Zero) | Out-Null
+          Start-Sleep -Seconds 12
+          $p.Refresh()
+          "cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s exited=$($p.HasExited)"
+          Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | ForEach-Object { "child $($_.ProcessId) $($_.CommandLine)" }
+          Get-ChildItem (Join-Path $env:TEMP 'VPN_*') -ErrorAction SilentlyContinue | ForEach-Object {
+            "temp $($_.Name)"
+            Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { "  $($_.Name) $($_.Length)" }
           }
-
-          Look 'probe\official.exe' 'official'
-          Look 'probe\ours.exe' 'ours'
+          $dlg2 = [Win]::Find([uint32]$p.Id, '#32770')
+          "dialog still there=$($dlg2 -ne [IntPtr]::Zero)"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Get-Process -Name vpnsetup -ErrorAction SilentlyContinue | Stop-Process -Force
