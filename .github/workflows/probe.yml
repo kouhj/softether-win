@@ -12,77 +12,78 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force probe | Out-Null
           Invoke-WebRequest -UseBasicParsing `
-            -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' `
-            -OutFile 'probe\ours.exe'
+            -Uri 'https://github.com/kouhj/softether-win/releases/download/5.2.5189/softether-vpnclient-5.02.5189.x64.exe' -OutFile 'probe\ours.exe'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://github.com/softethervpn/softethervpn/releases/download/5.2.5189/softether-vpnclient-5.02.5187.x64.exe' -OutFile 'probe\official.exe'
 
-      - name: Sample where the cpu goes
+      - name: List every window of both installers
         shell: pwsh
         run: |
           Add-Type -TypeDefinition @'
           using System;
+          using System.Text;
           using System.Runtime.InteropServices;
 
-          public class Tool
+          public class Win
           {
-              [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern IntPtr OpenThread(uint access, bool inherit, uint tid);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern uint SuspendThread(IntPtr h);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern uint ResumeThread(IntPtr h);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern bool CloseHandle(IntPtr h);
-              [DllImport("kernel32.dll", SetLastError = true)]
-              public static extern bool GetThreadContext(IntPtr hThread, IntPtr lpContext);
+              public delegate bool Proc(IntPtr h, IntPtr l);
+              [DllImport("user32.dll")] static extern bool EnumWindows(Proc p, IntPtr l);
+              [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, Proc p, IntPtr l);
+              [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+              [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetDlgCtrlID(IntPtr h);
 
-              public static ulong Rip(uint tid)
+              public static System.Collections.Generic.List<string> Dump(uint pid)
               {
-                  IntPtr h = OpenThread(0x0002 | 0x0008 | 0x0040, false, tid);
-                  if (h == IntPtr.Zero) return 0;
-                  try
+                  var lines = new System.Collections.Generic.List<string>();
+                  EnumWindows((h, l) =>
                   {
-                      if (SuspendThread(h) == 0xFFFFFFFF) return 0;
-                      try
+                      uint p;
+                      GetWindowThreadProcessId(h, out p);
+                      if (p == pid)
                       {
-                          IntPtr raw = Marshal.AllocHGlobal(0x600);
-                          try
-                          {
-                              IntPtr p = new IntPtr((raw.ToInt64() + 15) & ~15L);
-                              for (int i = 0; i < 0x600; i++) Marshal.WriteByte(p, i, 0);
-                              Marshal.WriteInt32(p, 0x30, unchecked((int)0x00100001));
-                              if (!GetThreadContext(h, p)) return 0;
-                              return (ulong)Marshal.ReadInt64(p, 0xF8);
-                          }
-                          finally { Marshal.FreeHGlobal(raw); }
+                          lines.Add(Describe(h, ""));
+                          EnumChildWindows(h, (c, l2) => { lines.Add(Describe(c, "    ")); return true; }, IntPtr.Zero);
                       }
-                      finally { ResumeThread(h); }
-                  }
-                  finally { CloseHandle(h); }
+                      return true;
+                  }, IntPtr.Zero);
+                  return lines;
+              }
+
+              static string Describe(IntPtr h, string indent)
+              {
+                  var cls = new StringBuilder(256);
+                  var txt = new StringBuilder(1024);
+                  GetClassNameW(h, cls, 256);
+                  GetWindowTextW(h, txt, 1024);
+                  return string.Format("{0}{1} id={2} visible={3} class={4} text={5}",
+                      indent, h.ToString("x"), GetDlgCtrlID(h), IsWindowVisible(h), cls, txt.ToString().Replace("\r", " ").Replace("\n", " "));
               }
           }
           '@
 
-          function Resolve($p, [ulong]$address) {
-            foreach ($m in $p.Modules) {
-              $b = [uint64]$m.BaseAddress.ToInt64()
-              if ($address -ge $b -and $address -lt $b + [uint64]$m.ModuleMemorySize) {
-                return ('{0}+0x{1:x}' -f $m.ModuleName, ($address - $b))
+          function Look([string]$exe, [string]$label) {
+            "=== $label"
+            $p = Start-Process -FilePath $exe -PassThru
+            Start-Sleep -Seconds 8
+            $p.Refresh()
+            "  cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s exited=$($p.HasExited)"
+            if (-not $p.HasExited) {
+              [Win]::Dump([uint32]$p.Id) | ForEach-Object { "  W $_" }
+              Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" |
+                ForEach-Object { "  child $($_.ProcessId) $($_.CommandLine)" }
+              $t = Join-Path $env:TEMP 'VPN_*'
+              Get-ChildItem $t -ErrorAction SilentlyContinue | ForEach-Object {
+                "  temp $($_.Name)"
+                Get-ChildItem $_.FullName -ErrorAction SilentlyContinue | ForEach-Object { "    $($_.Name) $($_.Length)" }
               }
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
             }
-            return $null
+            Get-Process -Name vpnsetup,vpnclient,vpncmgr -ErrorAction SilentlyContinue | Stop-Process -Force
+            Remove-Item (Join-Path $env:TEMP 'VPN_*') -Recurse -Force -ErrorAction SilentlyContinue
           }
 
-          $p = Start-Process -FilePath 'probe\ours.exe' -PassThru
-          Start-Sleep -Seconds 5
-          $p.Refresh()
-          $t = $p.Threads | Where-Object { $_.ThreadState -eq 'Running' } | Select-Object -First 1
-          "cpu=$([math]::Round($p.TotalProcessorTime.TotalSeconds,2))s thread=$($t.Id)"
-          $hits = @{}
-          for ($i = 0; $i -lt 400; $i++) {
-            $where = Resolve $p ([Tool]::Rip([uint32]$t.Id))
-            if ($where) { if ($hits.ContainsKey($where)) { $hits[$where]++ } else { $hits[$where] = 1 } }
-            Start-Sleep -Milliseconds 2
-          }
-          $hits.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 15 |
-            ForEach-Object { "{0,4}  {1}" -f $_.Value, $_.Key }
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Look 'probe\official.exe' 'official'
+          Look 'probe\ours.exe' 'ours'
