@@ -208,6 +208,73 @@ def patch_sfx_dialog() -> None:
     )
 
 
+def trace_setup_flow() -> None:
+    """Write the setup wizard milestones to the file named by SOFTETHER_SETUP_TRACE."""
+    log("instrumenting the setup flow")
+    sw = SOURCE / "src" / "Cedar" / "SW.c"
+    inject(
+        sw,
+        "void SwUiMain(SW *sw)\r\n",
+        "// Appends one line to the file named by SOFTETHER_SETUP_TRACE\r\n"
+        "static void SwTrace(const char *text)\r\n"
+        "{\r\n"
+        "\twchar_t path[MAX_SIZE];\r\n"
+        "\tHANDLE h;\r\n"
+        "\tchar line[MAX_SIZE];\r\n"
+        "\tint len;\r\n"
+        "\r\n"
+        "\tif (GetEnvironmentVariableW(L\"SOFTETHER_SETUP_TRACE\", path, MAX_SIZE) == 0)\r\n"
+        "\t{\r\n\t\treturn;\r\n\t}\r\n"
+        "\r\n"
+        "\th = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,\r\n"
+        "\t\tOPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);\r\n"
+        "\tif (h == INVALID_HANDLE_VALUE)\r\n\t{\r\n\t\treturn;\r\n\t}\r\n"
+        "\tlen = sprintf_s(line, sizeof(line), \"%s\\r\\n\", text);\r\n"
+        "\tif (len > 0)\r\n\t{\r\n\t\tWriteFile(h, line, (DWORD)len, NULL, NULL);\r\n\t}\r\n"
+        "\tCloseHandle(h);\r\n"
+        "}\r\n"
+        "\r\n",
+    )
+    inject(
+        sw,
+        "\tw = NewWizard(ICO_SETUP, BMP_SELOGO49x49, verstr, sw);\r\n",
+        "\r\n\tSwTrace(\"wizard created\");\r\n",
+    )
+    inject(
+        sw,
+        "\tInitWinUi(verstr, _SS(\"DEFAULT_FONT\"), _II(\"DEFAULT_FONT_SIZE\"));\r\n",
+        "\r\n\tSwTrace(MsIsAdmin() ? \"ui ready, admin\" : \"ui ready, not admin\");\r\n",
+    )
+    inject(
+        sw,
+        "\t// Parse the command line\r\n\tSwParseCommandLine(sw);\r\n",
+        "\r\n\tSwTrace(\"arguments parsed\");\r\n",
+    )
+    inject(
+        sw,
+        "\t// Detect the installable components\r\n\tSwDetectComponents(sw);\r\n",
+        "\r\n\tSwTrace(\"components detected\");\r\n",
+    )
+    inject(
+        sw,
+        "\t\t// UI main\r\n\t\t\tSwUiMain(sw);\r\n",
+        "\r\n\tSwTrace(\"wizard closed\");\r\n",
+    )
+    with open(sw, encoding="utf-8", newline="") as stream:
+        text = stream.read()
+    pattern = re.compile(r"([ \t]*)ShowWizard\(NULL, w, start_page\);")
+    matches = pattern.findall(text)
+    if len(matches) < 1:
+        raise SystemExit("no ShowWizard call found")
+    text = pattern.sub(
+        lambda m: m.group(0) + "\r\n" + m.group(1) + 'SwTrace("showing the wizard");',
+        text,
+    )
+    with open(sw, "w", encoding="utf-8", newline="") as stream:
+        stream.write(text)
+    log(f"  traced {len(matches)} ShowWizard call sites")
+
+
 def install_feature() -> None:
     log("installing the netrule feature")
     for name in ("netrule.c", "netrule.h"):
@@ -262,6 +329,7 @@ def main() -> None:
     fetch()
 
     patch_sfx_dialog()
+    trace_setup_flow()
 
     patches = sorted((ROOT / "patches").glob("*.patch"))
     prepared = (SOURCE / "src" / "Cedar" / "netrule.c").is_file()
